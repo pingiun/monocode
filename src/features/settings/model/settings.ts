@@ -192,10 +192,17 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     keywords: "mono agent rail hide",
   },
   {
+    id: "rail-monos-pinned",
+    section: "monos",
+    label: "Pin monos to the icon rail",
+    keywords: "mono rail compact collapsed icons top divider project picker",
+  },
+  {
     id: "mono-list",
     section: "monos",
     label: "Your monos",
-    keywords: "mono reset soul name projects sessions sidebar visibility hidden show",
+    keywords:
+      "mono reset soul name projects sessions sidebar visibility hidden show",
   },
   {
     id: "project-worktrees",
@@ -376,6 +383,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
       "effort thinking reasoning fast service tier model picker composer",
   },
   {
+    id: "composer-autocorrect",
+    section: "chat",
+    label: "Autocorrect",
+    keywords: "spelling spell check autocorrect typo macos composer",
+  },
+  {
     id: "composer-mascot",
     section: "chat",
     label: "Composer mascot",
@@ -404,7 +417,7 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     section: "providers",
     label: "Agent CLIs",
     keywords:
-      "codex opencode cursor grok pi omp fx hermes antigravity binary path",
+      "codex opencode cursor grok pi omp fx hermes antigravity devin binary path",
   },
   {
     id: "provider-accounts",
@@ -430,6 +443,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     section: "providers",
     label: "Claude Code hooks",
     keywords: "pretooluse settings.json block command notification",
+  },
+  {
+    id: "idle-agents",
+    section: "providers",
+    label: "Keep idle agents ready",
+    keywords: "memory ram cpu performance process warm park background",
   },
   {
     id: "project-notifications",
@@ -812,6 +831,28 @@ export function subscribeMonosEnabled(onStoreChange: () => void) {
     window.removeEventListener(MONOS_ENABLED_CHANGE_EVENT, onStoreChange);
 }
 
+const MONO_MENU_BAR_KEY = "monocode.monoMenuBarIcon";
+
+/** Fired on `window` when the menu bar icon is shown or hidden. */
+export const MONO_MENU_BAR_CHANGE_EVENT = "monocode:mono-menu-bar-change";
+
+export function loadMonoMenuBarIcon(): boolean {
+  return readFlag(MONO_MENU_BAR_KEY) ?? true;
+}
+
+export function saveMonoMenuBarIcon(value: boolean) {
+  writeFlag(MONO_MENU_BAR_KEY, value);
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(MONO_MENU_BAR_CHANGE_EVENT));
+}
+
+export function subscribeMonoMenuBarIcon(onStoreChange: () => void) {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(MONO_MENU_BAR_CHANGE_EVENT, onStoreChange);
+  return () =>
+    window.removeEventListener(MONO_MENU_BAR_CHANGE_EVENT, onStoreChange);
+}
+
 const QUICK_COMPOSER_ENABLED_KEY = "monocode.quickComposerEnabled";
 const QUICK_COMPOSER_SHORTCUT_KEY = "monocode.quickComposerShortcut";
 
@@ -1017,12 +1058,40 @@ export function saveClaudeHooks(value: boolean) {
   writeFlag(CLAUDE_HOOKS_KEY, value);
 }
 
+const IDLE_AGENT_LIMIT_KEY = "monocode.idleAgentLimit";
+
+/** How many finished conversations keep their agent CLI warm. */
+export const IDLE_AGENT_LIMITS = [0, 1, 2, 3, 5] as const;
+export type IdleAgentLimit = (typeof IDLE_AGENT_LIMITS)[number];
+export const IDLE_AGENT_LIMIT_DEFAULT: IdleAgentLimit = 3;
+
+export function loadIdleAgentLimit(): IdleAgentLimit {
+  try {
+    const raw = Number(localStorage.getItem(IDLE_AGENT_LIMIT_KEY) ?? NaN);
+    return (
+      IDLE_AGENT_LIMITS.find((limit) => limit === raw) ??
+      IDLE_AGENT_LIMIT_DEFAULT
+    );
+  } catch {
+    return IDLE_AGENT_LIMIT_DEFAULT;
+  }
+}
+
+export function saveIdleAgentLimit(value: IdleAgentLimit) {
+  try {
+    localStorage.setItem(IDLE_AGENT_LIMIT_KEY, String(value));
+  } catch {
+    // private mode / quota
+  }
+}
+
 const CTRL = IS_MAC ? "⌃" : "Ctrl+";
 
 export type KeybindingRow = {
   command: string;
   keys: string;
   when: string;
+  fixed?: true;
 };
 
 /**
@@ -1085,6 +1154,12 @@ export const KEYBINDINGS: KeybindingRow[] = [
     when: "sessionFocus && !overlay",
   },
   {
+    command: "Session: Stop",
+    keys: "Esc",
+    when: "sessionBusy && !terminalFocus",
+    fixed: true,
+  },
+  {
     command: "Session: Previous",
     keys: `${MOD}${SHIFT}↑`,
     when: "!overlay && (!textFocus || emptyComposer)",
@@ -1142,7 +1217,9 @@ export type KeybindingOverride = {
 
 export type KeybindingOverrides = Record<string, KeybindingOverride>;
 
-const VALID_COMMANDS = new Set(KEYBINDINGS.map((row) => row.command));
+const VALID_COMMANDS = new Set(
+  KEYBINDINGS.filter((row) => !row.fixed).map((row) => row.command),
+);
 
 const KEY_CODES: Record<string, string> = {
   " ": "Space",

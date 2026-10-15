@@ -3,7 +3,7 @@ import {
   allowVideoFile,
   readBinaryFile,
 } from "../../../platform/tauri/fs";
-import { isVideoPath, sniffImageMime } from "../../files/model/filePreview";
+import { isInlineVideoPath, sniffImageMime } from "../../files/model/filePreview";
 
 export type LocalImageState =
   | { status: "loading" }
@@ -80,7 +80,7 @@ function loadVideo(path: string, entry: Entry) {
 }
 
 function load(path: string, entry: Entry) {
-  if (isVideoPath(path)) {
+  if (isInlineVideoPath(path)) {
     loadVideo(path, entry);
     return;
   }
