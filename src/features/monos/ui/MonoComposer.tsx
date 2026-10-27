@@ -51,6 +51,8 @@ const FIELD_CLASSES =
 type Props = {
   sessionId: string;
   name: string;
+  /** Replaces the default "Message {name}" hint. */
+  placeholder?: string;
   enabled?: boolean;
   focusToken?: number;
   quoteRequest?: QuoteRequest;
@@ -82,6 +84,7 @@ type Props = {
 export function MonoComposer({
   sessionId,
   name,
+  placeholder,
   enabled = true,
   focusToken,
   quoteRequest,
@@ -327,7 +330,7 @@ export function MonoComposer({
       ref={field}
       rows={1}
       aria-label={`Message ${name}`}
-      placeholder={`Message ${name}`}
+      placeholder={placeholder ?? `Message ${name}`}
       spellCheck={autocorrect}
       autoCorrect={autocorrect ? "on" : "off"}
       disabled={!enabled || submitting}

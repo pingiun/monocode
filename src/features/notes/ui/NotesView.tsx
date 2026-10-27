@@ -331,6 +331,7 @@ export function NotesView({
       className="flex min-h-0 min-w-0 flex-1 flex-col text-content"
     >
       <div
+        data-app-view-header
         className="flex h-10 shrink-0 select-none items-center border-b border-stroke"
         data-tauri-drag-region="deep"
       >

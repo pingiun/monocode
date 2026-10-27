@@ -10,6 +10,12 @@ import { isImeComposition } from "../../../shared/lib/keyboard";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { Modal } from "../../../shared/ui/Modal";
 import { Popover } from "../../../shared/ui/Popover";
+import { SearchableSelect } from "../../../shared/ui/SearchableSelect";
+import {
+  COORDINATOR_COMPACT_OPTIONS,
+  COORDINATOR_ROTATE_TOKENS,
+  coordinatorCompactAt,
+} from "../../coordinator/model/coordinator";
 import { Settings, Sparkles, StickyNote } from "../../../shared/ui/icons";
 import type { HarnessId, RuntimeMode } from "../../sessions/model/session";
 import { AccessPicker } from "../../sessions/ui/AccessPicker";
@@ -27,7 +33,6 @@ import {
 } from "../model/mono";
 import { ConfirmReset } from "./ConfirmReset";
 import { MemoryPage, SoulPage, useMonoFiles } from "./MonoFilePages";
-import { MonoProjects } from "./MonoProjects";
 import { ColorPicker, MascotPicker, SwitchRow } from "./monoPanelParts";
 
 export type MonoSettingsSection = "general" | "soul" | "memory";
@@ -38,7 +43,7 @@ const SECTIONS: {
   icon: typeof Settings;
 }[] = [
   { id: "general", label: "General", icon: Settings },
-  { id: "soul", label: "Soul", icon: Sparkles },
+  { id: "soul", label: "Instructions", icon: Sparkles },
   { id: "memory", label: "Memory", icon: StickyNote },
 ];
 
@@ -63,8 +68,9 @@ type Props = {
 };
 
 /**
- * Who the Mono is and how it works, in a dialog of its own: its name, face,
- * model and projects under General, then its soul and memory.
+ * Who a project's coordinator is and how it works, in a dialog of its own:
+ * its name, face, model and context limit under General, then its
+ * instructions and memory.
  */
 export function MonoSettingsDialog({
   monoId,
@@ -78,7 +84,7 @@ export function MonoSettingsDialog({
   const files = useMonoFiles(monoId, status);
   return (
     <Modal
-      title={`${agent.name} settings`}
+      title={`${agent.name} project settings`}
       size="lg"
       minimalHeader
       fitViewport
@@ -118,9 +124,17 @@ export function MonoSettingsDialog({
         </nav>
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           {section === "general" ? (
-            <GeneralSection monoId={monoId} agent={agent} {...general} />
+            <GeneralSection
+              monoId={monoId}
+              agent={agent}
+              {...general}
+            />
           ) : section === "soul" ? (
-            <SoulPage monoId={monoId} agent={agent} files={files} />
+            <SoulPage
+              monoId={monoId}
+              agent={agent}
+              files={files}
+            />
           ) : (
             <MemoryPage monoId={monoId} files={files} />
           )}
@@ -207,12 +221,14 @@ function GeneralSection({
         </SettingRow>
       </SettingGroup>
 
-      <GroupHeading
-        title="Projects"
-        description="It can see every session, note and folder in these."
-      />
+      <GroupHeading title="Context" />
       <SettingGroup>
-        <MonoProjects monoId={monoId} projects={agent.projects} />
+        <SettingRow
+          label="Compact at"
+          description="How full its context gets before the next turn starts fresh with a brief of the conversation."
+        >
+          <CompactAtPicker monoId={monoId} />
+        </SettingRow>
       </SettingGroup>
 
       <GroupHeading title="Sessions it starts" />
@@ -248,8 +264,8 @@ function GeneralSection({
           <ConfirmReset
             label="Reset conversation"
             title={`Reset ${agent.name}'s conversation?`}
-            body="All messages in this Mono's conversation will be deleted and any active reply will be stopped. This can't be undone."
-            kept="Its soul, memory and habits will be kept."
+            body="All messages in this project's coordinator conversation will be deleted and any active reply will be stopped. This can't be undone."
+            kept="Its instructions and memory will be kept."
             failure="Could not reset the conversation."
             onConfirm={onReset}
           >
@@ -257,7 +273,7 @@ function GeneralSection({
               <SettingGroup>
                 <SettingRow
                   label="Reset conversation"
-                  description="Clear all messages and start fresh. Its soul, memory and habits stay."
+                  description="Clear all messages and start fresh. Its instructions and memory stay."
                 >
                   <button
                     ref={ref}
@@ -274,6 +290,41 @@ function GeneralSection({
         </>
       ) : null}
     </div>
+  );
+}
+
+function formatTokens(tokens: number): string {
+  return `${Math.round(tokens / 1000)}k tokens`;
+}
+
+/**
+ * How full the coordinator's context gets before its next turn starts fresh
+ * with a brief of the conversation.
+ */
+function CompactAtPicker({ monoId }: { monoId: string }) {
+  const current = useSyncExternalStore(subscribeMonos, () =>
+    coordinatorCompactAt(findMono(monoId)?.compactAt),
+  );
+  const options = [...new Set([...COORDINATOR_COMPACT_OPTIONS, current])].sort(
+    (a, b) => a - b,
+  );
+  return (
+    <SearchableSelect
+      label="Compact the coordinator at"
+      value={String(current)}
+      searchable={false}
+      variant="transparent"
+      options={options.map((tokens) => ({
+        value: String(tokens),
+        label:
+          tokens === COORDINATOR_ROTATE_TOKENS
+            ? `${formatTokens(tokens)} (default)`
+            : formatTokens(tokens),
+      }))}
+      onChange={(value) =>
+        updateMono(monoId, (mono) => ({ ...mono, compactAt: Number(value) }))
+      }
+    />
   );
 }
 

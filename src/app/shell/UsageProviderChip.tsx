@@ -63,17 +63,18 @@ type UsageWindowEntry = {
 
 export type UsageChipVariant = "footer" | "composer";
 
-const USAGE_CHIP_CLASSES: Record<UsageChipVariant, string> = {
+export const USAGE_CHIP_CLASSES: Record<UsageChipVariant, string> = {
   footer:
-    "-mx-1 inline-flex h-5 min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded px-1 text-content/55 transition-[background-color,color,transform] duration-150 ease-out hover:bg-content/10 hover:text-content focus-visible:outline-2 focus-visible:outline-accent active:scale-[0.97]",
+    "-mx-1 inline-flex h-5 min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-1 text-content/55 transition-[background-color,color,transform] duration-150 ease-out hover:bg-content/10 hover:text-content focus-visible:outline-2 focus-visible:outline-accent active:scale-[0.97]",
   composer:
     "inline-flex h-6.5 min-w-0 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-1.5 text-content/55 transition-colors hover:bg-content/8 hover:text-content focus-visible:outline-2 focus-visible:outline-accent",
 };
 
 /** The refresh button beside the usage chips, per variant. */
+
 export const USAGE_REFRESH_CLASSES: Record<UsageChipVariant, string> = {
   footer:
-    "grid size-4.5 shrink-0 place-items-center rounded text-content/40 hover:bg-content/10 hover:text-content disabled:opacity-50",
+    "grid size-4.5 shrink-0 place-items-center rounded-md text-content/40 hover:bg-content/10 hover:text-content disabled:opacity-50",
   composer:
     "grid size-6.5 shrink-0 place-items-center rounded-md text-content/40 transition-colors hover:bg-content/8 hover:text-content disabled:opacity-50",
 };
@@ -264,6 +265,15 @@ export function UsageProviderChip({
           <span className="animate-pulse text-content/35">···</span>
         ) : disconnected ? (
           <span className="text-content/35">not connected</span>
+        ) : limits.status === "untracked" ? (
+          <>
+            {accounts.length > 1 && activeAccount ? (
+              <span className="max-w-24 truncate text-content/45">
+                {activeAccount.label}
+              </span>
+            ) : null}
+            <span className="text-content/35">API token</span>
+          </>
         ) : windows.length === 0 ? (
           <span className="text-content/35">{emptyUsageLabel(limits)}</span>
         ) : (
@@ -1125,6 +1135,18 @@ function EmptyUsageState({
   limits: ProviderRateLimits;
   loading: boolean;
 }) {
+  if (limits.status === "untracked") {
+    return (
+      <div className="rounded-lg bg-content/[0.04] px-3 py-4 text-center ring-1 ring-inset ring-content/[0.06]">
+        <p className="text-[11px] font-medium text-content/65">
+          {limits.error || "API token"}
+        </p>
+        <p className="mx-auto mt-1 max-w-[15rem] text-[10px] leading-4 text-content/40">
+          This profile uses an API token, so there is no plan usage to show.
+        </p>
+      </div>
+    );
+  }
   return (
     <div className="rounded-lg bg-content/[0.04] px-3 py-4 text-center ring-1 ring-inset ring-content/[0.06]">
       <p className="text-[11px] font-medium text-content/65">

@@ -10,6 +10,7 @@ import {
   resolveModel,
 } from "../../features/sessions/model/models";
 import {
+  formatSessionTitle,
   newSession,
   type Session,
   type Attachment,
@@ -41,7 +42,7 @@ export async function acceptQuickLaunch(
       sessionId: string,
       text: string,
       attachments: Attachment[],
-      options?: { intent: "plan" | "orchestrate" },
+      options?: { intent?: "plan" | "orchestrate"; forwardedBy?: string },
     ) => SubmissionAcceptance;
     saveDraft?: (
       sessionId: string,
@@ -80,6 +81,10 @@ export async function acceptQuickLaunch(
     );
   session.id = deliveryId;
   if (!existing && launch.sidebarHidden) session.sidebarHidden = true;
+  if (!existing && launch.providerAccountId)
+    session.providerAccountId = launch.providerAccountId;
+  if (!existing && launch.title?.trim())
+    session.title = formatSessionTitle(session.harness, launch.title.trim());
   if (launch.modelSettings) {
     session.modelSettings = mergeModelSettings(
       resolveModel(session.harness, session.model),
@@ -95,8 +100,11 @@ export async function acceptQuickLaunch(
       : tab.id;
     if (!tabId) throw new Error("The target pane is unavailable");
     workspace.updateSessions((sessions) => [...sessions, session]);
-    if (!placement && openTab) workspace.appendTab(tab, launch.cwd);
-    if (launch.reveal && (placement || openTab)) {
+    // A detached launch (a project thread) and one followed elsewhere (from
+    // the Mono that ran it) both start without a workspace tab.
+    const showTab = openTab && !launch.detached;
+    if (!placement && showTab) workspace.appendTab(tab, launch.cwd);
+    if (launch.reveal && (placement || showTab)) {
       // The title bar filters tabs by this project. Select it before the tab.
       workspace.setProjectCwd(launch.cwd);
       workspace.setRecents(rememberProject(launch.cwd));
@@ -120,7 +128,16 @@ export async function acceptQuickLaunch(
       session.id,
       launch.prompt,
       attachments,
-      ...(launch.intent ? [{ intent: launch.intent }] : []),
+      ...(launch.intent || launch.forwardedBy
+        ? [
+            {
+              ...(launch.intent ? { intent: launch.intent } : {}),
+              ...(launch.forwardedBy
+                ? { forwardedBy: launch.forwardedBy }
+                : {}),
+            },
+          ]
+        : []),
     ))
   ) {
     throw new Error("The workspace could not accept the queued session yet.");

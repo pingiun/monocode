@@ -221,6 +221,7 @@ import {
   subscribeProjectProviders,
 } from "../../sessions/model/projectProviders";
 import {
+  DEFAULT_PROVIDER_ACCOUNT_ID,
   newProviderAccount,
   providerAccounts,
   PROVIDER_ACCOUNT_PROVIDERS,
@@ -232,7 +233,13 @@ import {
   type ProviderAccount,
   type ProviderAccountProvider,
 } from "../../providers/model/providerAccounts";
-import { removeProviderAccountCredentials } from "../../providers/model/providerAccountCredentials";
+import {
+  claudeAccountEndpoint,
+  clearClaudeAccountEndpoint,
+  removeProviderAccountCredentials,
+  setClaudeAccountEndpoint,
+} from "../../providers/model/providerAccountCredentials";
+import { loadRateLimits } from "../../providers/model/rateLimitsCache";
 import {
   identityKey,
   identityOrganizationTag,
@@ -241,12 +248,12 @@ import {
 import { ProviderAccountSubtitle } from "../../providers/ui/ProviderAccountSubtitle";
 import {
   saveComposerAutocorrect,
+  savePacedReveal,
+  usePacedReveal,
   saveMaskEmails,
-  saveRailMonosPinned,
   saveShowRemainingUsage,
   useComposerAutocorrect,
   useMaskEmails,
-  useRailMonosPinned,
   useShowRemainingUsage,
 } from "../model/displayPrefs";
 import {
@@ -304,22 +311,10 @@ import {
 import { useTabGroupLogos } from "../../projects/hooks/useTabGroupLogos";
 import { ProjectLogoIcon } from "../../projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
-import { PixelMascot } from "../../projects/ui/PixelMascot";
-import {
-  defaultMonoName,
-  listMonos,
-  monoLook,
-  monoProjectsPhrase,
-  monosSnapshot,
-  subscribeMonos,
-  updateMono,
-  type Mono,
-} from "../../monos/model/mono";
-import { resetMonoDefaults } from "../../monos/model/monoFiles";
-import { ConfirmReset } from "../../monos/ui/ConfirmReset";
 import {
   filterKeybindings,
   currentKeybindings,
+  loadClaudeAutoCompactWindow,
   loadClaudeHooks,
   loadIdleAgentLimit,
   loadCloseToTray,
@@ -333,18 +328,21 @@ import {
   loadLiveAgentsEnabled,
   loadModelControls,
   loadNotesEnabled,
-  loadMonosEnabled,
   loadMonoMenuBarIcon,
   loadKeybindingOverrides,
   saveMonoMenuBarIcon,
   subscribeMonoMenuBarIcon,
   loadQuickComposerEnabled,
   loadQuickComposerShortcut,
+  loadSessionSteps,
   loadTabAnimationsEnabled,
+  saveClaudeAutoCompactWindow,
   saveClaudeHooks,
   saveIdleAgentLimit,
   IDLE_AGENT_LIMITS,
   type IdleAgentLimit,
+  CLAUDE_AUTO_COMPACT_WINDOWS,
+  type ClaudeAutoCompactWindow,
   saveCloseToTray,
   saveCollapsedProjectRailMode,
   saveComposerRunner,
@@ -356,14 +354,13 @@ import {
   saveLiveAgentsEnabled,
   saveModelControls,
   saveNotesEnabled,
-  saveMonosEnabled,
-  subscribeMonosEnabled,
   saveKeybindingOverride,
   validateKeybindingShortcut,
   saveQuickComposerEnabled,
   saveQuickComposerShortcut,
   subscribeKeybindings,
   type KeybindingOverride,
+  saveSessionSteps,
   saveTabAnimationsEnabled,
   searchSettings,
   settingsSectionDescription,
@@ -524,6 +521,37 @@ export function SettingsView({
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  // The breadcrumb and page actions, in the page's own header row.
+  const settingsHeader = (
+    <>
+      <div className="flex min-w-0 flex-1 items-center gap-2 text-[13px] px-3">
+        <span className="shrink-0 text-content/45">Settings</span>
+        <span aria-hidden className="shrink-0 text-content/25">
+          /
+        </span>
+        <span className="min-w-0 truncate text-content">
+          {settingsSectionLabel(section)}
+        </span>
+      </div>
+      <div
+        className="flex shrink-0 items-center gap-1.5 pr-2"
+        data-tauri-drag-region="false"
+      >
+        {section === "appearance" ? (
+          <button
+            type="button"
+            onClick={appearance.restoreDefaults}
+            className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-content/50 hover:bg-content/10 hover:text-content"
+          >
+            <RotateCcw className="size-3.5" strokeWidth={1.75} />
+            Restore defaults
+          </button>
+        ) : null}
+        <SettingsSearch onReveal={onReveal} />
+      </div>
+    </>
+  );
+
   return (
     <div
       role="region"
@@ -536,31 +564,7 @@ export function SettingsView({
         data-tauri-drag-region="deep"
       >
         {IS_MAC && !besideRail ? <div className="w-[78px] shrink-0" /> : null}
-        <div className="flex min-w-0 flex-1 items-center gap-2 px-3 text-[13px]">
-          <span className="shrink-0 text-content/45">Settings</span>
-          <span aria-hidden className="shrink-0 text-content/25">
-            /
-          </span>
-          <span className="min-w-0 truncate text-content">
-            {settingsSectionLabel(section)}
-          </span>
-        </div>
-        <div
-          className="flex shrink-0 items-center gap-1.5 pr-2"
-          data-tauri-drag-region="false"
-        >
-          {section === "appearance" ? (
-            <button
-              type="button"
-              onClick={appearance.restoreDefaults}
-              className="flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1 text-[12px] text-content/50 hover:bg-content/10 hover:text-content"
-            >
-              <RotateCcw className="size-3.5" strokeWidth={1.75} />
-              Restore defaults
-            </button>
-          ) : null}
-          <SettingsSearch onReveal={onReveal} />
-        </div>
+        {settingsHeader}
         {IS_MAC ? null : <WindowControls />}
       </div>
 
@@ -595,7 +599,6 @@ export function SettingsView({
               ) : null}
               {section === "chat" ? <ChatPage /> : null}
               {section === "keybindings" ? <KeybindingsPage /> : null}
-              {section === "monos" ? <MonosPage /> : null}
               {section === "mcp" ? (
                 <McpSettings cwd={cwd} recents={recents} />
               ) : null}
@@ -787,6 +790,11 @@ function GeneralPage({
   const [quickComposerError, setQuickComposerError] = useState<string | null>(
     null,
   );
+  const menuBarIcon = useSyncExternalStore(
+    subscribeMonoMenuBarIcon,
+    loadMonoMenuBarIcon,
+    () => true,
+  );
 
   // The user may flip the switch in System Settings and come back: re-read
   // the OS state whenever the window regains focus while the toggle is on.
@@ -941,6 +949,19 @@ function GeneralPage({
             />
           </Row>
         )}
+        {IS_MAC && (
+          <Row
+            id="mono-menu-bar-icon"
+            label="Menu bar icon"
+            description="Open the quick composer from the macOS menu bar. Turn this off to hide the icon."
+          >
+            <Toggle
+              label="Menu bar icon"
+              on={menuBarIcon}
+              onChange={saveMonoMenuBarIcon}
+            />
+          </Row>
+        )}
         <Row
           id="working-agents"
           label="Working agents"
@@ -975,12 +996,14 @@ function GeneralPage({
 }
 
 function ChatPage() {
+  const pacedReveal = usePacedReveal();
   const [transcriptLayout, setTranscriptLayout] =
     useState<TranscriptLayout>(loadTranscriptLayout);
   const [transcriptAnchor, setTranscriptAnchor] =
     useState(loadTranscriptAnchor);
   const [followUpBehavior, setFollowUpBehavior] =
     useState<FollowUpBehavior>(loadFollowUpBehavior);
+  const [sessionSteps, setSessionSteps] = useState(loadSessionSteps);
   const [modelControls, setModelControls] =
     useState<ModelControls>(loadModelControls);
   const [diffViewer, setDiffViewer] = useState<DiffViewer>(loadDiffViewer);
@@ -1014,6 +1037,11 @@ function ChatPage() {
   const onFollowUpBehavior = (next: FollowUpBehavior) => {
     saveFollowUpBehavior(next);
     setFollowUpBehavior(next);
+  };
+
+  const onSessionSteps = (next: boolean) => {
+    saveSessionSteps(next);
+    setSessionSteps(next);
   };
 
   const onModelControls = (next: ModelControls) => {
@@ -1071,6 +1099,28 @@ function ChatPage() {
             label="Anchor prompts to top"
             on={transcriptAnchor}
             onChange={onTranscriptAnchor}
+          />
+        </Row>
+        <Row
+          id="session-steps"
+          label="Step list in sessions"
+          description="Ask sessions to plan their work as a task list and keep it current, with its progress pinned above the transcript. Project threads always work this way."
+        >
+          <Toggle
+            label="Step list in sessions"
+            on={sessionSteps}
+            onChange={onSessionSteps}
+          />
+        </Row>
+        <Row
+          id="paced-reveal"
+          label="Smooth text reveal"
+          description="Reveal incoming bursts gradually. Turn this off to show received text immediately. This changes presentation timing, not processing speed."
+        >
+          <Toggle
+            label="Smooth text reveal"
+            on={pacedReveal}
+            onChange={savePacedReveal}
           />
         </Row>
       </Group>
@@ -2212,7 +2262,9 @@ function AppearancePage({ appearance }: { appearance: AppearanceSettings }) {
             display={`${appearance.themeSaturation}%`}
             min={THEME_SATURATION_MIN}
             max={THEME_SATURATION_MAX}
-            onChange={(value) => appearance.onTint(appearance.themeHue, value)}
+            onChange={(value) =>
+              appearance.onTint(appearance.themeHue, value)
+            }
           />
         </Row>
         <Row
@@ -2383,7 +2435,7 @@ function ChatBackgroundCard({
               ) : (
                 <div
                   aria-hidden
-                  className="size-full bg-cover bg-center bg-no-repeat"
+                  className="chat-background-fade size-full bg-cover bg-center bg-no-repeat"
                   style={{
                     backgroundImage: "var(--chat-background-image)",
                     opacity: appearance.chatBackgroundEmptyOpacity,
@@ -3207,6 +3259,8 @@ function ProvidersPage({
   const [choice, setChoice] = useState(loadLastModelChoice);
   const [defaultModels, setDefaultModels] = useState(loadDefaultModels);
   const [claudeHooks, setClaudeHooks] = useState(loadClaudeHooks);
+  const [claudeAutoCompactWindow, setClaudeAutoCompactWindow] =
+    useState<ClaudeAutoCompactWindow>(loadClaudeAutoCompactWindow);
   const [idleAgentLimit, setIdleAgentLimit] =
     useState<IdleAgentLimit>(loadIdleAgentLimit);
   const [scope, setScope] = useState<string>(GLOBAL_PROVIDER_SCOPE);
@@ -3266,6 +3320,12 @@ function ProvidersPage({
   const onClaudeHooks = (next: boolean) => {
     saveClaudeHooks(next);
     setClaudeHooks(next);
+  };
+
+  const onClaudeAutoCompactWindow = (next: string) => {
+    const window = Number(next) as ClaudeAutoCompactWindow;
+    saveClaudeAutoCompactWindow(window);
+    setClaudeAutoCompactWindow(window);
   };
 
   const onIdleAgentLimit = (next: string) => {
@@ -3393,6 +3453,21 @@ function ProvidersPage({
           />
         </Row>
         <Row
+          id="claude-auto-compact"
+          label="Claude auto-compact window"
+          description="How full a Claude Code conversation gets before it summarizes older context, for 1M-context models such as Opus 5.5. Compaction fires just under the chosen size; models with a smaller window keep compacting at their own limit. Default leaves it to Claude Code. Takes effect on the next turn."
+        >
+          <Segmented
+            label="Claude auto-compact window"
+            value={String(claudeAutoCompactWindow)}
+            options={CLAUDE_AUTO_COMPACT_WINDOWS.map((window) => ({
+              value: String(window),
+              label: window === 0 ? "Default" : `${window / 1000}k`,
+            }))}
+            onChange={onClaudeAutoCompactWindow}
+          />
+        </Row>
+        <Row
           id="claude-hooks"
           label="Claude Code hooks"
           description="Run the hooks configured in your settings.json files — PreToolUse command rewrites, blocks, notifications, and the rest — just as the Claude Code CLI would. Turn this off if a hook is misbehaving and you need the session back. Takes effect on the next turn."
@@ -3443,6 +3518,13 @@ type AccountEditor = {
   provider: ProviderAccountProvider;
   accountId?: string;
   label: string;
+  /** Named Claude profiles can use an API token instead of a sign-in. */
+  auth?: "signin" | "token";
+  baseUrl?: string;
+  token?: string;
+  usageUrl?: string;
+  /** The profile already has a token, so leaving `token` blank keeps it. */
+  hasToken?: boolean;
 };
 
 function ProviderAccountsSettings() {
@@ -3468,11 +3550,30 @@ function ProviderAccountsSettings() {
       accountId: account.id,
       label: account.label,
     });
+    if (!accountCanUseToken(account.provider, account.id)) return;
+    void claudeAccountEndpoint(account.id)
+      .then((endpoint) => {
+        if (!endpoint) return;
+        setEditor((current) =>
+          current?.accountId === account.id && current.auth === undefined
+            ? {
+                ...current,
+                auth: "token",
+                baseUrl: endpoint.baseUrl ?? "",
+                usageUrl: endpoint.usageUrl ?? "",
+                hasToken: true,
+              }
+            : current,
+        );
+      })
+      .catch(() => {
+        // Without the endpoint the editor still renames the profile.
+      });
   };
 
   const submitEditor = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!editor || !editor.label.trim() || working) return;
+    if (!editor || !accountEditorReady(editor) || working) return;
     const key = editor.accountId
       ? `rename:${editor.provider}:${editor.accountId}`
       : `add:${editor.provider}`;
@@ -3480,10 +3581,24 @@ function ProviderAccountsSettings() {
     setError(null);
     try {
       if (editor.accountId) {
-        renameProviderAccount(editor.provider, editor.accountId, editor.label);
+        const accountId = editor.accountId;
+        if (accountCanUseToken(editor.provider, accountId)) {
+          if (editor.auth === "token") {
+            await setClaudeAccountEndpoint(accountId, editorEndpoint(editor));
+          } else if (editor.hasToken && editor.auth === "signin") {
+            await clearClaudeAccountEndpoint(accountId);
+            await loginHarness(editor.provider, accountId);
+          }
+          void loadRateLimits(editor.provider, accountId, true);
+        }
+        renameProviderAccount(editor.provider, accountId, editor.label);
       } else {
         const account = newProviderAccount(editor.provider, editor.label);
-        await loginHarness(editor.provider, account.id);
+        if (editor.auth === "token") {
+          await setClaudeAccountEndpoint(account.id, editorEndpoint(editor));
+        } else {
+          await loginHarness(editor.provider, account.id);
+        }
         saveProviderAccount(account);
       }
       setEditor(null);
@@ -3596,9 +3711,9 @@ function ProviderAccountsSettings() {
                     key={account.id}
                     editor={editor}
                     working={Boolean(working)}
-                    onLabel={(label) =>
+                    onChange={(patch) =>
                       setEditor((current) =>
-                        current ? { ...current, label } : current,
+                        current ? { ...current, ...patch } : current,
                       )
                     }
                     onCancel={() => setEditor(null)}
@@ -3677,9 +3792,9 @@ function ProviderAccountsSettings() {
                 <ProviderAccountEditor
                   editor={editor}
                   working={Boolean(working)}
-                  onLabel={(label) =>
+                  onChange={(patch) =>
                     setEditor((current) =>
-                      current ? { ...current, label } : current,
+                      current ? { ...current, ...patch } : current,
                     )
                   }
                   onCancel={() => setEditor(null)}
@@ -3702,29 +3817,59 @@ function ProviderAccountsSettings() {
   );
 }
 
+/** Only named Claude profiles can swap their sign-in for an API token. */
+function accountCanUseToken(
+  provider: ProviderAccountProvider,
+  accountId: string | undefined,
+): boolean {
+  return provider === "claude" && accountId !== DEFAULT_PROVIDER_ACCOUNT_ID;
+}
+
+function editorEndpoint(editor: AccountEditor) {
+  return {
+    baseUrl: editor.baseUrl ?? "",
+    token: editor.token ?? "",
+    usageUrl: editor.usageUrl ?? "",
+  };
+}
+
+/** A name, plus a token for a profile that uses one and has none yet. */
+function accountEditorReady(editor: AccountEditor): boolean {
+  if (!editor.label.trim()) return false;
+  if (editor.auth !== "token" || editor.hasToken) return true;
+  return Boolean(editor.token?.trim());
+}
+
 function ProviderAccountEditor({
   editor,
   working,
-  onLabel,
+  onChange,
   onCancel,
   onSubmit,
 }: {
   editor: AccountEditor;
   working: boolean;
-  onLabel: (label: string) => void;
+  onChange: (patch: Partial<AccountEditor>) => void;
   onCancel: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   const adding = !editor.accountId;
+  const canUseToken = accountCanUseToken(editor.provider, editor.accountId);
+  const usesToken = canUseToken && editor.auth === "token";
+  // Leaving a token profile signs in with the browser on save.
+  const signsIn = adding
+    ? !usesToken
+    : Boolean(editor.hasToken) && editor.auth === "signin";
+  const fieldClass =
+    "flex h-8 min-w-0 flex-1 items-center overflow-hidden rounded-md border border-content/10 bg-content/[0.04] focus-within:border-accent/45";
+  const inputClass =
+    "h-full w-full bg-transparent px-2.5 text-[12px] text-content outline-none placeholder:text-content/25 disabled:opacity-50";
   return (
     <form
-      className="flex h-12 items-center border-b border-content/5 px-4 py-2 last:border-b-0"
+      className="flex flex-col gap-2 border-b border-content/5 px-4 py-2 last:border-b-0"
       onSubmit={onSubmit}
     >
-      <div
-        data-provider-account-editor-field
-        className="flex items-center pr-1 h-8 min-w-0 flex-1 overflow-hidden rounded-md border border-content/10 bg-content/[0.04] focus-within:border-accent/45"
-      >
+      <div data-provider-account-editor-field className={`${fieldClass} pr-1`}>
         <label className="h-full min-w-0 flex-1">
           <span className="sr-only">Account name</span>
           <input
@@ -3735,10 +3880,30 @@ function ProviderAccountEditor({
             disabled={working}
             placeholder="Work or Personal"
             aria-label={`${adding ? "New" : "Rename"} ${HARNESS_TITLE[editor.provider]} account`}
-            onChange={(event) => onLabel(event.target.value)}
-            className="h-full w-full bg-transparent px-2.5 text-[12px] text-content outline-none placeholder:text-content/25 disabled:opacity-50"
+            onChange={(event) => onChange({ label: event.target.value })}
+            className={inputClass}
           />
         </label>
+        {canUseToken ? (
+          <button
+            type="button"
+            disabled={working}
+            aria-pressed={usesToken}
+            title={
+              usesToken
+                ? "Sign in with a Claude account instead"
+                : "Use an API endpoint and token instead of signing in"
+            }
+            onClick={() => onChange({ auth: usesToken ? "signin" : "token" })}
+            className={`mr-1 flex h-6 shrink-0 items-center rounded-[4.5px] px-2.5 text-[11px] transition-transform duration-150 active:scale-[0.97] disabled:opacity-40 ${
+              usesToken
+                ? "bg-accent/15 text-accent"
+                : "bg-content/[0.05] text-content/45 hover:bg-content/10 hover:text-content"
+            }`}
+          >
+            API token
+          </button>
+        ) : null}
         <button
           type="button"
           disabled={working}
@@ -3749,17 +3914,68 @@ function ProviderAccountEditor({
         </button>
         <button
           type="submit"
-          disabled={working || !editor.label.trim()}
+          disabled={working || !accountEditorReady(editor)}
           className="ml-1 flex h-6 shrink-0 items-center gap-1.5 rounded-[4.5px] bg-content px-2.5 text-[11px] font-medium text-background-base transition-transform duration-150 hover:bg-content/85 active:scale-[0.97] disabled:cursor-default disabled:opacity-40"
         >
           {working ? <Loader className="size-3 animate-spin" /> : null}
-          {adding
+          {signsIn
             ? working
               ? "Waiting for browser…"
-              : "Sign in and add"
-            : "Save"}
+              : adding
+                ? "Sign in and add"
+                : "Sign in and save"
+            : adding
+              ? "Add"
+              : "Save"}
         </button>
       </div>
+      {usesToken ? (
+        <div className="flex gap-2">
+          <label className={fieldClass}>
+            <span className="sr-only">API base URL</span>
+            <input
+              type="url"
+              value={editor.baseUrl ?? ""}
+              disabled={working}
+              placeholder="Base URL (blank for api.anthropic.com)"
+              spellCheck={false}
+              onChange={(event) => onChange({ baseUrl: event.target.value })}
+              className={inputClass}
+            />
+          </label>
+          <label className={fieldClass}>
+            <span className="sr-only">API token</span>
+            <input
+              type="password"
+              value={editor.token ?? ""}
+              disabled={working}
+              placeholder={
+                editor.hasToken
+                  ? "New token (blank keeps current)"
+                  : "API token"
+              }
+              autoComplete="off"
+              spellCheck={false}
+              onChange={(event) => onChange({ token: event.target.value })}
+              className={inputClass}
+            />
+          </label>
+        </div>
+      ) : null}
+      {usesToken ? (
+        <label className={fieldClass}>
+          <span className="sr-only">Usage URL</span>
+          <input
+            type="url"
+            value={editor.usageUrl ?? ""}
+            disabled={working}
+            placeholder="Usage URL (optional, Claude usage format)"
+            spellCheck={false}
+            onChange={(event) => onChange({ usageUrl: event.target.value })}
+            className={inputClass}
+          />
+        </label>
+      ) : null}
     </form>
   );
 }
@@ -4061,134 +4277,6 @@ function formatDate(value: number): string {
   } catch {
     return "";
   }
-}
-
-/** Monos on or off, and each Mono the user has. */
-function MonosPage() {
-  const enabled = useSyncExternalStore(
-    subscribeMonosEnabled,
-    loadMonosEnabled,
-    () => true,
-  );
-  const menuBarIcon = useSyncExternalStore(
-    subscribeMonoMenuBarIcon,
-    loadMonoMenuBarIcon,
-    () => true,
-  );
-  const railPinned = useRailMonosPinned();
-  const snapshot = useSyncExternalStore(subscribeMonos, monosSnapshot);
-  const monos = useMemo(() => listMonos(), [snapshot]);
-
-  return (
-    <>
-      <Group title="Monos">
-        <Row
-          id="monos-enabled"
-          label="Show monos"
-          description="Agents of your own on the project rail. Each works on the projects you give it, remembers what matters and picks up habits it runs on its own. Turn this off to hide them."
-        >
-          <Toggle label="Show monos" on={enabled} onChange={saveMonosEnabled} />
-        </Row>
-        <Row
-          id="rail-monos-pinned"
-          label="Pin monos to the icon rail"
-          description="When the project rail is collapsed to icons, show each Mono at the top of the rail, above a divider, instead of inside the project picker."
-        >
-          <Toggle
-            label="Pin monos to the icon rail"
-            on={railPinned}
-            onChange={saveRailMonosPinned}
-            disabled={!enabled}
-          />
-        </Row>
-        {IS_MAC && (
-          <Row
-            id="mono-menu-bar-icon"
-            label="Menu bar icon"
-            description="Chat with a Mono or open the quick composer from the macOS menu bar. Turn this off to hide the icon."
-          >
-            <Toggle
-              label="Menu bar icon"
-              on={menuBarIcon}
-              onChange={saveMonoMenuBarIcon}
-            />
-          </Row>
-        )}
-      </Group>
-      <Group
-        id="mono-list"
-        title="Your monos"
-        description="Choose whether new sessions started by each Mono appear in the sidebar. Hidden sessions remain saved and can be opened from the Mono's chat. Add a Mono with the plus on the rail and choose its projects from its details."
-      >
-        {monos.length ? (
-          monos.map((mono) => <MonoRow key={mono.id} mono={mono} />)
-        ) : (
-          <p className="px-4 py-3.5 text-[12px] text-content/45">
-            No monos yet.
-          </p>
-        )}
-      </Group>
-    </>
-  );
-}
-
-function MonoRow({ mono }: { mono: Mono }) {
-  const look = monoLook(mono);
-  return (
-    <Row
-      label={
-        <span className="flex min-w-0 items-center gap-2">
-          <PixelMascot
-            name={look.mascot}
-            color={look.color}
-            still
-            className="size-4 shrink-0"
-          />
-          <span className="truncate">{look.name}</span>
-        </span>
-      }
-      description={
-        look.projects.length
-          ? `Works on ${monoProjectsPhrase(look.projects)}`
-          : "No projects yet"
-      }
-    >
-      <span className="text-[12px] leading-5 text-content/50">
-        Show Mono spawned session on the sidebar
-      </span>
-      <Toggle
-        label={`Show sessions started by ${look.name} in sidebar`}
-        on={mono.showStartedSessionsInSidebar === true}
-        onChange={(on) =>
-          updateMono(mono.id, (entry) => ({
-            ...entry,
-            showStartedSessionsInSidebar: on,
-          }))
-        }
-      />
-      <ConfirmReset
-        label="Reset Mono"
-        title={`Reset ${look.name} to its defaults?`}
-        body={`Its soul goes back to the default and its name to ${defaultMonoName(look.mascot)}. Changes to its soul can't be recovered.`}
-        kept="Its conversation, projects, memory and habits will be kept."
-        failure="Could not reset the Mono."
-        onConfirm={() => resetMonoDefaults(mono.id)}
-      >
-        {(open, ref) => (
-          <button
-            ref={ref}
-            type="button"
-            title="Reset to defaults"
-            aria-label={`Reset ${look.name} to defaults`}
-            onClick={open}
-            className="grid size-7 place-items-center rounded-md text-content/40 transition-transform duration-150 hover:bg-content/10 hover:text-content active:scale-[0.96]"
-          >
-            <RotateCcw className="size-3.5" strokeWidth={1.75} />
-          </button>
-        )}
-      </ConfirmReset>
-    </Row>
-  );
 }
 
 function PageHeader({

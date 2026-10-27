@@ -16,6 +16,7 @@ use crate::dirs_home;
 pub(crate) const MAX_TEXT_FILE_BYTES: u64 = 8 * 1024 * 1024;
 pub(crate) const MAX_ATTACHMENT_EMBED_BYTES: u64 = 20 * 1024 * 1024;
 pub(crate) const MAX_PREVIEW_BYTES: u64 = 25 * 1024 * 1024;
+const MAX_DOCUMENT_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 const MAX_GENERATED_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
 const MAX_GENERATED_IMAGE_DATA_BYTES: u64 = MAX_GENERATED_IMAGE_BYTES * 4 / 3 + 4;
 const GENERATED_IMAGE_DIR: &str = "generated-images";
@@ -636,7 +637,7 @@ pub struct ProjectFile {
 /// index-backed); otherwise a bounded walk that never descends into vendor dirs.
 #[tauri::command]
 pub async fn list_project_files(cwd: String) -> Result<Vec<ProjectFile>, String> {
-    tauri::async_runtime::spawn_blocking(move || list_project_files_sync(&cwd))
+    crate::background_work::read(move || list_project_files_sync(&cwd))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -839,7 +840,7 @@ pub struct GitDiffStats {
 /// plus untracked (gitignore-aware) files counted as additions.
 #[tauri::command]
 pub async fn git_diff_stats(cwd: String) -> Result<GitDiffStats, String> {
-    tauri::async_runtime::spawn_blocking(move || git_diff_stats_for(&expand_home(&cwd)))
+    crate::background_work::read(move || git_diff_stats_for(&expand_home(&cwd)))
         .await
         .map_err(|e| e.to_string())
 }
@@ -876,7 +877,7 @@ pub struct GitDiffIndex {
 /// Changed files in the opened folder, with per-file line counts and status.
 #[tauri::command]
 pub async fn git_diff_index(cwd: String) -> Result<GitDiffIndex, String> {
-    tauri::async_runtime::spawn_blocking(move || git_diff_index_for(&expand_home(&cwd)))
+    crate::background_work::read(move || git_diff_index_for(&expand_home(&cwd)))
         .await
         .map_err(|e| e.to_string())
 }
@@ -884,7 +885,7 @@ pub async fn git_diff_index(cwd: String) -> Result<GitDiffIndex, String> {
 /// Changed files and counts without branch/upstream synchronization metadata.
 #[tauri::command]
 pub async fn git_diff_files(cwd: String) -> Result<GitDiffIndex, String> {
-    tauri::async_runtime::spawn_blocking(move || git_diff_files_for(&expand_home(&cwd)))
+    crate::background_work::read(move || git_diff_files_for(&expand_home(&cwd)))
         .await
         .map_err(|e| e.to_string())
 }
@@ -909,11 +910,9 @@ pub async fn git_file_diff(
     relative: String,
     staged: bool,
 ) -> Result<GitFileDiff, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        git_file_diff_for(&expand_home(&cwd), &relative, staged)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    crate::background_work::read(move || git_file_diff_for(&expand_home(&cwd), &relative, staged))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 const GIT_HISTORY_DEFAULT: u32 = 200;
@@ -950,7 +949,7 @@ pub struct GitHistory {
 /// branch. Newest first, with parent SHAs for the graph.
 #[tauri::command]
 pub async fn git_history(cwd: String, limit: Option<u32>) -> Result<GitHistory, String> {
-    tauri::async_runtime::spawn_blocking(move || git_history_for(&expand_home(&cwd), limit))
+    crate::background_work::read(move || git_history_for(&expand_home(&cwd), limit))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -958,7 +957,7 @@ pub async fn git_history(cwd: String, limit: Option<u32>) -> Result<GitHistory, 
 /// Files changed in one commit (first parent / root).
 #[tauri::command]
 pub async fn git_commit_files(cwd: String, sha: String) -> Result<Vec<GitChangedFile>, String> {
-    tauri::async_runtime::spawn_blocking(move || git_commit_files_for(&expand_home(&cwd), &sha))
+    crate::background_work::read(move || git_commit_files_for(&expand_home(&cwd), &sha))
         .await
         .map_err(|e| e.to_string())?
 }
@@ -970,7 +969,7 @@ pub async fn git_commit_file_diff(
     sha: String,
     relative: String,
 ) -> Result<GitFileDiff, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    crate::background_work::read(move || {
         git_commit_file_diff_for(&expand_home(&cwd), &sha, &relative)
     })
     .await
@@ -4557,10 +4556,15 @@ pub(crate) fn resolve_repo_path(root: &Path, relative: &str) -> Result<String, S
 /// Any git can start a filter: in an LFS repo `status`, `diff`, `add`, and
 /// checkouts all run `git-lfs`, which a Finder launch's bare PATH lacks. The
 /// cached search path finds it without waiting on the login shell.
+///
+/// Git runs at normal priority: lowering it needs a `pre_exec` hook, which
+/// forces a fork of the whole app for every call. Reads are short-lived, and
+/// agents editing files trigger dozens of them a minute.
 fn git_cmd() -> Command {
-    let mut cmd = Command::new("git");
+    let path = crate::harness::cached_gui_search_path();
+    let mut cmd = Command::new(crate::harness::program_on_path("git", &path));
     crate::hide_window_console(&mut cmd);
-    cmd.env("PATH", crate::harness::cached_gui_search_path());
+    cmd.env("PATH", path);
     cmd
 }
 
@@ -5702,6 +5706,66 @@ fn read_binary_file_sync(path: &str) -> Result<Vec<u8>, String> {
     std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))
 }
 
+/// Read an image that a Markdown document in a project shows.
+///
+/// The document is untrusted, so `path` must be relative to `root` and the
+/// file must resolve inside it with symlinks followed: a README cannot pull in
+/// a file from elsewhere on disk. The caller sniffs the bytes, as for
+/// `read_binary_file`.
+#[tauri::command]
+pub async fn read_project_image(
+    root: String,
+    path: String,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        read_project_image_sync(Path::new(&root), Path::new(&path))
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+fn read_project_image_sync(root: &Path, path: &Path) -> Result<Vec<u8>, String> {
+    use std::path::Component;
+    if !path
+        .components()
+        .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+    {
+        return Err("Image path must stay inside the project".into());
+    }
+    let root = std::fs::canonicalize(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let joined = root.join(path);
+    let file = std::fs::canonicalize(&joined).map_err(|e| format!("{}: {e}", joined.display()))?;
+    if !file.starts_with(&root) {
+        return Err("Image is outside the project".into());
+    }
+    let handle = std::fs::File::open(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    let meta = handle
+        .metadata()
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    if !meta.is_file() {
+        return Err("Not a file".into());
+    }
+    let too_large = || {
+        format!(
+            "Image is too large to show (maximum {} MB).",
+            MAX_DOCUMENT_IMAGE_BYTES / 1024 / 1024
+        )
+    };
+    if meta.len() > MAX_DOCUMENT_IMAGE_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
+    handle
+        .take(MAX_DOCUMENT_IMAGE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("{}: {e}", file.display()))?;
+    if bytes.len() as u64 > MAX_DOCUMENT_IMAGE_BYTES {
+        return Err(too_large());
+    }
+    Ok(bytes)
+}
+
 /// Persist a pasted blob so non-image attachments have a real path.
 #[tauri::command]
 pub async fn write_attachment(name: String, data: String) -> Result<String, String> {
@@ -6175,7 +6239,7 @@ pub async fn copy_file_to(from: String, to: String) -> Result<(), String> {
 }
 
 /// Video formats the webview can play straight from disk.
-const INLINE_VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm"];
+const CHAT_VIDEO_EXTENSIONS: &[&str] = &["mp4", "m4v", "mov", "webm"];
 
 #[derive(Serialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -6184,19 +6248,27 @@ pub struct StreamableVideo {
     size: u64,
 }
 
-fn is_inline_video(path: &Path) -> bool {
+fn is_chat_video(path: &Path) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .map(|ext| ext.to_ascii_lowercase())
-        .is_some_and(|ext| INLINE_VIDEO_EXTENSIONS.contains(&ext.as_str()))
+        .is_some_and(|ext| CHAT_VIDEO_EXTENSIONS.contains(&ext.as_str()))
 }
 
 /// Let the asset protocol stream one video file, so the chat can play it
 /// without reading it into memory. Only that file is added to the scope.
 #[tauri::command]
-pub fn allow_video_file(app: AppHandle, path: String) -> Result<StreamableVideo, String> {
-    let path = expand_home(&path);
-    if !is_inline_video(&path) {
+pub async fn allow_video_file(app: AppHandle, path: String) -> Result<StreamableVideo, String> {
+    // A sync command runs on the main thread, and stat can stall on iCloud,
+    // network or external volumes while the chat opens.
+    tauri::async_runtime::spawn_blocking(move || allow_video_file_sync(&app, &path))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+fn allow_video_file_sync(app: &AppHandle, path: &str) -> Result<StreamableVideo, String> {
+    let path = expand_home(path);
+    if !is_chat_video(&path) {
         return Err(format!("{}: not a playable video", path.display()));
     }
     let meta = std::fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -6329,8 +6401,8 @@ mod tests {
     #[test]
     fn only_video_containers_can_join_the_stream_scope() {
         use std::path::Path;
-        assert!(is_inline_video(Path::new("/clips/demo.MP4")));
-        assert!(is_inline_video(Path::new("/clips/demo.webm")));
+        assert!(is_streamable_video(Path::new("/clips/demo.MP4")));
+        assert!(is_streamable_video(Path::new("/clips/demo.webm")));
         for path in [
             "/home/me/.ssh/id_rsa",
             "/notes/a.md",
@@ -6338,7 +6410,7 @@ mod tests {
             "/mp4",
             "/a.mp4.txt",
         ] {
-            assert!(!is_inline_video(Path::new(path)), "{path}");
+            assert!(!is_streamable_video(Path::new(path)), "{path}");
         }
     }
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -6738,6 +6810,53 @@ mod tests {
         let bytes = read_binary_file_sync(&file.to_string_lossy()).unwrap();
         assert_eq!(bytes, vec![0x89, b'P', b'N', b'G', 0x0d]);
         assert!(read_binary_file_sync(&dir.0.to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn project_images_read_only_inside_the_project() {
+        let dir = tmp("project-image");
+        let root = dir.0.join("repo");
+        std::fs::create_dir_all(root.join(".github/readme")).unwrap();
+        let png = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+        std::fs::write(root.join(".github/readme/hero.png"), png).unwrap();
+        std::fs::write(dir.0.join("secret.png"), b"secret").unwrap();
+
+        let read = |path: &str| read_project_image_sync(&root, Path::new(path));
+        assert_eq!(read(".github/readme/hero.png").unwrap(), png);
+        assert_eq!(read("./.github/readme/hero.png").unwrap(), png);
+        assert!(read("../secret.png").is_err());
+        assert!(read(".github/../../secret.png").is_err());
+        assert!(read(&dir.0.join("secret.png").to_string_lossy()).is_err());
+        assert!(read(".github").is_err());
+        assert!(read("").is_err());
+        assert!(read("missing.png").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_images_refuse_symlinks_out_of_the_project() {
+        let dir = tmp("project-image-link");
+        let root = dir.0.join("repo");
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(dir.0.join("secret.png"), b"secret").unwrap();
+        std::fs::write(root.join("docs/inside.png"), b"inside").unwrap();
+        std::os::unix::fs::symlink(dir.0.join("secret.png"), root.join("leak.png")).unwrap();
+        std::os::unix::fs::symlink(&dir.0, root.join("outside")).unwrap();
+        std::os::unix::fs::symlink(root.join("docs/inside.png"), root.join("alias.png")).unwrap();
+
+        let read = |path: &str| read_project_image_sync(&root, Path::new(path));
+        assert!(read("leak.png").is_err());
+        assert!(read("outside/secret.png").is_err());
+        assert_eq!(read("alias.png").unwrap(), b"inside");
+    }
+
+    #[test]
+    fn project_images_refuse_oversized_files() {
+        let dir = tmp("project-image-size");
+        let file = std::fs::File::create(dir.0.join("huge.png")).unwrap();
+        file.set_len(MAX_DOCUMENT_IMAGE_BYTES + 1).unwrap();
+        let error = read_project_image_sync(&dir.0, Path::new("huge.png")).unwrap_err();
+        assert!(error.contains("too large"), "{error}");
     }
 
     #[test]
@@ -9353,6 +9472,15 @@ mod tests {
             .and_then(|(_, value)| value)
             .expect("git should get an explicit PATH");
         std::env::split_paths(path).collect()
+    }
+
+    /// A bare `git` with a PATH override makes std fork the whole app.
+    #[cfg(unix)]
+    #[test]
+    fn git_cmd_spawns_git_by_absolute_path() {
+        let program = PathBuf::from(git_cmd().get_program());
+        assert!(program.is_absolute(), "{program:?}");
+        assert_eq!(program.file_name().unwrap(), "git");
     }
 
     /// git-lfs and other filters live in Homebrew dirs a Finder launch lacks.

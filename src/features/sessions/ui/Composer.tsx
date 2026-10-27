@@ -31,7 +31,7 @@ import {
   pickAttachments,
   revokeAttachment,
 } from "../model/attachments";
-import { resizeComposer } from "../model/composerResize";
+import { resizeComposer, restoreComposerSize } from "../model/composerResize";
 import {
   isFileReferenceText,
   messageFilesFromClipboard,
@@ -46,12 +46,12 @@ import {
   subscribeProjectFiles,
 } from "../../files/model/fileIndex";
 import {
-  buildMentionIndex,
   fileMentionParts,
   mentionLabel,
   mentionTokenAt,
   rankMentionFiles,
   replaceMentionToken,
+  sharedMentionIndex,
   type MentionIndex,
   type MentionToken,
 } from "../../files/model/fileMentions";
@@ -152,6 +152,7 @@ import { resolveTabGroupLogo } from "../../workspace/model/tabGroups";
 import { useComposerSkills } from "./useComposerSkills";
 import { Popover } from "../../../shared/ui/Popover";
 import { UsageLimitNotice } from "./UsageLimitNotice";
+import { UsageLimitAccountPicker } from "./UsageLimitAccountPicker";
 import { consumePlanCommand, PLAN_COMMAND } from "../model/plan";
 import {
   consumeOperatorCommand,
@@ -291,6 +292,8 @@ type Props = {
     attachments: Attachment[],
     options?: ComposerTurnOptions,
   ) => boolean | void;
+  /** A leading `!<command>` runs locally instead of starting a turn. */
+  onRunBashCommand?: (command: string) => void;
   /** `draft` opens the side question with the text unsent, for a typed `/btw `. */
   onBtwCommand?: (
     text: string,
@@ -309,6 +312,9 @@ type Props = {
   onUsageLimitResume?: () => void;
   onUsageLimitResumeAtReset?: (enabled: boolean) => void;
   onUsageLimitDismiss?: () => void;
+  /** Continue this session under another account of its provider. */
+  onUsageLimitAccountChange?: (accountId: string) => void;
+  providerAccountId?: string;
   onOpenFile?: (path: string) => void;
   onDraftChange?: (text: string) => void;
   onRecallLastTurnReady?: (recall: () => void) => void;
@@ -419,6 +425,7 @@ export function Composer({
   onQuestionReply,
   onQuestionInteraction,
   onSubmit,
+  onRunBashCommand,
   canSaveDraft = false,
   onSaveDraft,
   onStop,
@@ -432,6 +439,8 @@ export function Composer({
   onUsageLimitResume,
   onUsageLimitResumeAtReset,
   onUsageLimitDismiss,
+  onUsageLimitAccountChange,
+  providerAccountId,
   onOpenFile,
   onDraftChange,
   onRecallLastTurnReady,
@@ -520,8 +529,11 @@ export function Composer({
   const remote = remoteSession;
   // Local indexes (files, skills) must never read a remote session's path.
   const localCwd = remote ? "" : executionCwd;
+  // Inactive tabs stay mounted. Their composers let go of the project listing
+  // and pick it up again when shown.
+  const fileCwd = enabled ? localCwd : "";
   const [files, setFiles] = useState<ProjectFile[]>(
-    () => peekProjectFiles(localCwd) ?? [],
+    () => peekProjectFiles(fileCwd) ?? [],
   );
   const notesEnabled = useSyncExternalStore(
     subscribeNotesEnabled,
@@ -618,18 +630,16 @@ export function Composer({
     [slashItems],
   );
   const leadingMode = leadingModeCommand(draft, skillNames);
+  const bashMode = !!onRunBashCommand && draft.startsWith("!");
   const modeIndent = leadingMode ? MODE_COMMAND_INDENT : undefined;
   useLayoutEffect(() => {
     // The indent can rewrap the first line after the input already resized.
     if (ref.current) resizeComposer(ref.current);
   }, [modeIndent]);
-  const mentionFiles = useMemo(
-    () => (notesEnabled ? [...files, ...notesAsProjectFiles(notes)] : files),
-    [files, notes, notesEnabled],
-  );
   const mentionIndex = useMemo(
-    () => buildMentionIndex(mentionFiles),
-    [mentionFiles],
+    () =>
+      sharedMentionIndex(files, notesEnabled ? notesAsProjectFiles(notes) : []),
+    [files, notes, notesEnabled],
   );
   const mentionIndexRef = useRef<MentionIndex>(mentionIndex);
   mentionIndexRef.current = mentionIndex;
@@ -896,21 +906,21 @@ export function Composer({
     const apply = (next: ProjectFile[]) => {
       if (!cancelled) setFiles(next);
     };
-    const cached = peekProjectFiles(localCwd);
+    const cached = peekProjectFiles(fileCwd);
     apply(cached ?? []);
-    if (!localCwd) return;
-    void loadProjectFiles(localCwd, mentionOpen)
+    if (!fileCwd) return;
+    void loadProjectFiles(fileCwd, mentionOpen)
       .then(apply)
       .catch(() => undefined);
     const unsub = subscribeProjectFiles(() => {
-      const next = peekProjectFiles(localCwd);
+      const next = peekProjectFiles(fileCwd);
       if (next) apply(next);
     });
     return () => {
       cancelled = true;
       unsub();
     };
-  }, [localCwd, mentionOpen]);
+  }, [fileCwd, mentionOpen]);
 
   useEffect(() => {
     if (!mentionOpen || !notesEnabled) return;
@@ -945,18 +955,19 @@ export function Composer({
     resizeComposer(el);
   }, [initialDraft]);
 
-  // Drafts changed while hidden could not be measured. Inbox panes are portaled
-  // into place by a parent effect that runs after this one, so the first pass
-  // can still find no layout box; retry once the move has landed.
+  // Measure once the browser has laid out the activated pane. A synchronous
+  // read here forces layout before the pooled transcript has been attached,
+  // then forces it again when that transcript restores its scroll position.
+  // ResizeObserver also handles inbox portals and drafts resized while hidden.
   useLayoutEffect(() => {
     const el = ref.current;
     if (!el || !enabled) return;
-    resizeComposer(el);
-    if (el.scrollHeight !== 0) return;
-    const frame = requestAnimationFrame(() => {
-      if (ref.current === el) resizeComposer(el);
+    const observer = new ResizeObserver((entries) => {
+      if (entries.some((entry) => entry.contentRect.width > 0))
+        restoreComposerSize(el);
     });
-    return () => cancelAnimationFrame(frame);
+    observer.observe(el);
+    return () => observer.disconnect();
   }, [enabled]);
 
   useEffect(() => {
@@ -1016,6 +1027,12 @@ export function Composer({
 
   const syncTokensFromTextarea = (el: HTMLTextAreaElement) => {
     if (creatingSkill) return;
+    // A shell command's `/` and `@` are paths and arguments, not pickers.
+    if (onRunBashCommand && el.value.startsWith("!")) {
+      setSlash(null);
+      setMention(null);
+      return;
+    }
     const cursor = el.selectionStart ?? 0;
     const token = slashTokenAt(el.value, cursor, hasNativeCommands(harness));
     setSlash(token);
@@ -1205,7 +1222,10 @@ export function Composer({
       )
     )
       return;
-    ref.current?.focus();
+    // Pane activation already positions the composer. Native focus scrolling
+    // otherwise walks the entire workspace and can move transcript ancestors.
+    if (ref.current && document.activeElement !== ref.current)
+      ref.current.focus({ preventScroll: true });
   }, [disabled, focused, question, busy, focusToken]);
 
   const fileDrag = useFileDrop({
@@ -1336,6 +1356,20 @@ export function Composer({
     }
     const value = ref.current?.value ?? submittedValue;
     if (disabled || worktreeRemoved) return;
+    if (onRunBashCommand && value.startsWith("!")) {
+      const command = value.slice(1).trim();
+      if (!command) return;
+      pasteGenerationRef.current += 1;
+      if (ref.current) {
+        ref.current.value = "";
+        ref.current.style.height = "auto";
+      }
+      setDraft("");
+      onDraftChange?.("");
+      syncHasValue("", attachmentsRef.current);
+      onRunBashCommand(command);
+      return;
+    }
     if (isMcpCommand(value)) {
       mcpInsertAt.current = 0;
       if (ref.current) {
@@ -1761,6 +1795,83 @@ export function Composer({
     });
   };
 
+  const fieldPadding = shell ? "py-4" : "py-3";
+  const workspaceBar = hideTopBar ? null : (
+    <div className="flex min-w-0 items-center gap-2.5 overflow-hidden px-3 pt-2.5">
+      {!remote && !hideProjectPicker ? (
+        <CwdPicker
+          cwd={cwd}
+          recents={recents}
+          projectLogoPath={projectLogoPath}
+          enabled={enabled}
+          onCwdChange={onCwdChange}
+          onNewTerminal={worktreeRemoved ? undefined : onNewTerminal}
+          onClose={() => ref.current?.focus()}
+        />
+      ) : null}
+      {hideBranchPicker ? null : draftWorkspace &&
+        onWorkspaceModeChange &&
+        onWorktreeBaseChange ? (
+        <>
+          <WorkspacePicker
+            cwd={executionCwd}
+            mode={workspaceMode ?? "current"}
+            base={resolvedWorktreeBase}
+            enabled={enabled && !busy}
+            onModeChange={onWorkspaceModeChange}
+            onBaseChange={onWorktreeBaseChange}
+            onSelectWorktree={onWorktreeChange}
+            onOpenSettings={onManageWorktrees}
+            onClose={() => ref.current?.focus()}
+          />
+          {(workspaceMode ?? "current") === "current" ? (
+            <BranchPicker
+              cwd={executionCwd}
+              branch={branch}
+              enabled={enabled && !busy}
+              onChange={onBranchChange}
+              onClose={() => ref.current?.focus()}
+            />
+          ) : null}
+        </>
+      ) : worktreeRemoved && onWorktreeChange ? (
+        <WorktreePicker
+          cwd={cwd}
+          executionCwd={executionCwd}
+          enabled={enabled && !busy}
+          onSelect={onWorktreeChange}
+          worktreeRemoved={worktreeRemoved}
+          onBranchChange={onBranchChange}
+          onManage={onManageWorktrees}
+          onClose={() => ref.current?.focus()}
+        />
+      ) : (
+        <>
+          {onWorktreeChange ? (
+            <WorkspaceIdentity
+              worktree={pathKey(cwd) !== pathKey(executionCwd)}
+            />
+          ) : null}
+          <BranchPicker
+            cwd={executionCwd}
+            branch={branch}
+            enabled={enabled && !busy}
+            onChange={onBranchChange}
+            onClose={() => ref.current?.focus()}
+          />
+        </>
+      )}
+      <div className="ml-auto flex shrink-0 items-center">
+        <ContextMeter
+          usage={context}
+          onCompact={
+            compactSupported && !worktreeRemoved ? onCompactContext : undefined
+          }
+          compactDisabled={busy}
+        />
+      </div>
+    </div>
+  );
   return (
     <div
       data-composer
@@ -1782,6 +1893,16 @@ export function Composer({
           onResume={onUsageLimitResume}
           onResumeAtReset={onUsageLimitResumeAtReset}
           onDismiss={onUsageLimitDismiss}
+          modelPicker={
+            onUsageLimitAccountChange ? (
+              <UsageLimitAccountPicker
+                harness={harness}
+                accountId={providerAccountId}
+                onSelect={onUsageLimitAccountChange}
+                variant="composer"
+              />
+            ) : undefined
+          }
         />
       ) : null}
       {backgroundTasks?.length || subagents ? (
@@ -1967,101 +2088,29 @@ export function Composer({
           ref={boxRef}
           data-composer-box
           data-composer-editing={resendEdited ? "" : undefined}
-          className={`relative z-10 border bg-content/3 backdrop-blur-sm ${
+          data-composer-bash={bashMode ? "" : undefined}
+          className={`relative z-10 border ${
             resendEdited
               ? "edit-last-turn-composer rounded-lg"
               : "rounded-lg border-content/10 has-focus:border-content/20"
           } ${
+            bashMode
+              ? "border-pink-500/50 has-focus:border-pink-500/60"
+              : ""
+          } ${
             fileDrag
               ? "border-accent/60"
-              : resendEdited
+              : resendEdited || bashMode
                 ? ""
                 : "border-content/10 has-focus:border-content/20"
           }`}
         >
           {fileDrag ? (
-            <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-lg bg-accent/8 text-[12px] text-content/70">
+            <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-[inherit] bg-accent/8 text-[12px] text-content/70">
               Drop files to attach
             </div>
           ) : null}
-          {hideTopBar ? null : (
-            <div className="flex min-w-0 items-center gap-2.5 overflow-hidden px-3 pt-2.5">
-              {!remote && !hideProjectPicker ? (
-                <CwdPicker
-                  cwd={cwd}
-                  recents={recents}
-                  projectLogoPath={projectLogoPath}
-                  enabled={enabled}
-                  onCwdChange={onCwdChange}
-                  onNewTerminal={worktreeRemoved ? undefined : onNewTerminal}
-                  onClose={() => ref.current?.focus()}
-                />
-              ) : null}
-              {hideBranchPicker ? null : draftWorkspace &&
-                onWorkspaceModeChange &&
-                onWorktreeBaseChange ? (
-                <>
-                  <WorkspacePicker
-                    cwd={executionCwd}
-                    mode={workspaceMode ?? "current"}
-                    base={resolvedWorktreeBase}
-                    enabled={enabled && !busy}
-                    onModeChange={onWorkspaceModeChange}
-                    onBaseChange={onWorktreeBaseChange}
-                    onSelectWorktree={onWorktreeChange}
-                    onOpenSettings={onManageWorktrees}
-                    onClose={() => ref.current?.focus()}
-                  />
-                  {(workspaceMode ?? "current") === "current" ? (
-                    <BranchPicker
-                      cwd={executionCwd}
-                      branch={branch}
-                      enabled={enabled && !busy}
-                      onChange={onBranchChange}
-                      onClose={() => ref.current?.focus()}
-                    />
-                  ) : null}
-                </>
-              ) : worktreeRemoved && onWorktreeChange ? (
-                <WorktreePicker
-                  cwd={cwd}
-                  executionCwd={executionCwd}
-                  enabled={enabled && !busy}
-                  onSelect={onWorktreeChange}
-                  worktreeRemoved={worktreeRemoved}
-                  onBranchChange={onBranchChange}
-                  onManage={onManageWorktrees}
-                  onClose={() => ref.current?.focus()}
-                />
-              ) : (
-                <>
-                  {onWorktreeChange ? (
-                    <WorkspaceIdentity
-                      worktree={pathKey(cwd) !== pathKey(executionCwd)}
-                    />
-                  ) : null}
-                  <BranchPicker
-                    cwd={executionCwd}
-                    branch={branch}
-                    enabled={enabled && !busy}
-                    onChange={onBranchChange}
-                    onClose={() => ref.current?.focus()}
-                  />
-                </>
-              )}
-              <div className="ml-auto flex shrink-0 items-center">
-                <ContextMeter
-                  usage={context}
-                  onCompact={
-                    compactSupported && !worktreeRemoved
-                      ? onCompactContext
-                      : undefined
-                  }
-                  compactDisabled={busy}
-                />
-              </div>
-            </div>
-          )}
+          {workspaceBar}
 
           {attachments.length > 0 ? (
             <div className="flex flex-wrap gap-1.5 px-3 pt-2">
@@ -2102,12 +2151,13 @@ export function Composer({
               aria-hidden
               style={{ textIndent: modeIndent }}
               className={`composer-highlight pointer-events-none absolute inset-0 max-h-40 overflow-hidden whitespace-pre-wrap wrap-break-word px-3 text-sm leading-5.5 text-content font-sans ${
-                shell ? "py-4" : "py-3"
+                fieldPadding
               }`}
             >
               <ComposerHighlight
                 text={draft}
                 mode={leadingMode}
+                bash={bashMode}
                 names={skillNames}
                 mentions={mentionIndex.labels}
                 mcpTags={selectedMcp}
@@ -2124,21 +2174,23 @@ export function Composer({
               placeholder={
                 worktreeRemoved
                   ? "Select a branch or worktree to continue…"
-                  : inboxCard
-                    ? "Add a note, or send to start…"
-                    : noteCard
-                      ? "Add a message, or send…"
-                      : handoffCard
-                        ? "Add context, or send to continue…"
-                        : (placeholder ??
-                          (shell
-                            ? "Ask, build, / for commands, @ for references... "
-                            : "Ask, build, / for commands, @ for references... "))
+                  : bashMode
+                    ? "Run a shell command…"
+                    : inboxCard
+                      ? "Add a note, or send to start…"
+                      : noteCard
+                        ? "Add a message, or send…"
+                        : handoffCard
+                          ? "Add context, or send to continue…"
+                          : (placeholder ??
+                            (shell
+                              ? "Ask, build, / for commands, @ for references... "
+                              : "Ask, build, / for commands, @ for references... "))
               }
               aria-label={inputAriaLabel}
               disabled={disabled}
               className={`composer-field scrollbar-none relative max-h-40 w-full resize-none overflow-x-hidden whitespace-pre-wrap wrap-break-word bg-transparent px-3 text-sm leading-5.5 outline-none placeholder:overflow-hidden placeholder:text-ellipsis placeholder:whitespace-nowrap font-sans ${
-                shell ? "py-4" : "py-3"
+                fieldPadding
               }`}
               onFocus={onFocus}
               onKeyDown={onKeyDown}
@@ -2484,16 +2536,27 @@ export function Composer({
 function ComposerHighlight({
   text,
   mode,
+  bash,
   names,
   mentions,
   mcpTags,
 }: {
   text: string;
   mode: ModeCommandToken | null;
+  bash?: boolean;
   names: ReadonlySet<string>;
   mentions: ReadonlyMap<string, ProjectFile>;
   mcpTags: McpTag[];
 }) {
+  if (bash) {
+    return (
+      <>
+        <span className="text-pink-600 dark:text-pink-400">!</span>
+        {text.slice(1)}
+        {text.endsWith("\n") ? "\n" : null}
+      </>
+    );
+  }
   const rest = mode ? text.slice(mode.end) : text;
   const parts = skillTextParts(rest, names);
   return (

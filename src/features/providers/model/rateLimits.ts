@@ -2,8 +2,9 @@ import { asRecord } from "../../../integrations/harness/providers/codex/codexPro
 
 export type RateLimitProvider = "claude" | "codex" | "opencode" | "devin";
 
+/** `untracked`: the account works, but has no plan usage to show (API token). */
 export type RateLimitStatus =
-  "idle" | "fetching" | "ok" | "error" | "unavailable";
+  "idle" | "fetching" | "ok" | "error" | "unavailable" | "untracked";
 
 export type RateLimitWindow = {
   /** Percentage of the window consumed (0–100). */
@@ -106,6 +107,16 @@ export function unavailableRateLimits(
     updatedAt: Date.now(),
     error,
     status: "unavailable",
+  };
+}
+
+export function untrackedRateLimits(
+  provider: RateLimitProvider,
+  label: string,
+): ProviderRateLimits {
+  return {
+    ...unavailableRateLimits(provider, label),
+    status: "untracked",
   };
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "monocode-desktop",
   "private": true,
-  "version": "0.13.0",
+  "version": "0.15.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -24,6 +24,7 @@
     "tauri:stable": "tauri dev --no-watch --config src-tauri/tauri.stable.conf.json",
     "setup:linux:deb": "bash scripts/install-linux-deps-debian.sh",
     "setup:linux:fedora": "bash scripts/install-linux-deps-fedora.sh",
+    "install:macos": "bash scripts/install-macos.sh",
     "build:linux": "tauri build --bundles deb,appimage && bash scripts/repack-appimage.sh",
     "build:fedora": "tauri build --bundles rpm",
     "build:windows": "set \"RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc\" && tauri build --bundles nsis"

@@ -96,3 +96,4 @@ it("invalidates the cached list when an automation changes", async () => {
   notifyAutomationsChanged();
   expect(peekAutomations()).toBeNull();
 });
+

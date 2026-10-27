@@ -11,6 +11,7 @@ import {
   inboxItemKey,
   inboxProjectsForRail,
   listInboxItems,
+  uniqueInboxProjects,
   type GithubWorkItem,
   type InboxItem,
   type InboxQuery,
@@ -68,12 +69,14 @@ const POLL_MS = 2 * 60_000;
 const HIDDEN_POLL_MS = 5 * 60_000;
 const POLL_TICK_MS = 30_000;
 
-type ProjectSeenEntry = InboxSeenEntry & NotificationSubject;
+type ProjectSeenEntry = InboxSeenEntry &
+  NotificationSubject & { projectPath: string };
 
 function seenEntries(items: readonly InboxItem[]): ProjectSeenEntry[] {
   return items.map((item) => ({
     key: inboxItemKey(item),
     updatedAt: item.updatedAt,
+    projectPath: item.projectPath,
     ...inboxNotificationSubject(item),
   }));
 }
@@ -102,7 +105,11 @@ export function useInboxActivity(
   recents: RecentProject[],
   cwd: string,
   sessions: readonly SessionSummary[],
-  options?: { onAppeared?: (items: InboxItem[]) => void },
+  options?: {
+    /** `listed` is the whole poll, for automations catching up on items
+     * MonoCode did not see appear. */
+    onAppeared?: (items: InboxItem[], listed: InboxItem[]) => void;
+  },
 ): InboxActivity {
   const [unseen, setUnseen] = useState(false);
   const [workItems, setWorkItems] = useState<
@@ -131,6 +138,10 @@ export function useInboxActivity(
   useLayoutEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    applyUnseen();
+  }, [applyUnseen]);
 
   useLayoutEffect(() => {
     onAppearedRef.current = options?.onAppeared;
@@ -193,13 +204,14 @@ export function useInboxActivity(
         );
         const observed = notifications.current.observe(
           listed.items,
-          inboxListCacheKey(projects, query),
+          inboxListCacheKey([], query),
           Object.keys(listed.errors) as InboxProvider[],
+          uniqueInboxProjects(projects).map((project) => project.path),
         );
         const changed = observed.changed;
         // Invoke on every successful poll so retained automation claims can be
         // retried even when the item is no longer newly appeared.
-        onAppearedRef.current?.(observed.appeared);
+        onAppearedRef.current?.(observed.appeared, listed.items);
         const selfAuthored = changed.filter((item) =>
           consumeInboxSelfActivity(item),
         );

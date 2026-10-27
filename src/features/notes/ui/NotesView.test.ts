@@ -944,3 +944,4 @@ it.each([
   expect(stored).toMatchObject({ title: "Release notes", slug, slugPending: false });
   expect(upserts().some((note) => note.finalizeSlug)).toBe(false);
 });
+

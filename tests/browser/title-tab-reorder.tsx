@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { emit, TauriEvent } from "@tauri-apps/api/event";
 import { TitleBar, type Tab } from "../../src/app/shell/TitleBar";
 import "../../src/styles/index.css";
 
 // Keep the real title bar and window controls, replacing only native IPC.
+const params = new URLSearchParams(location.search);
+let fullscreen = params.has("fullscreen");
 mockWindows("main");
 mockIPC(
   (command) => {
     if (command === "plugin:window|is_maximized") return false;
+    if (command === "plugin:window|is_fullscreen") return fullscreen;
     if (command === "plugin:window|set_title") return;
     throw new Error(`Unexpected command: ${command}`);
   },
@@ -48,8 +52,7 @@ function Fixture() {
     ...tab(id),
     busyHarnesses: tick % 2 ? (["claude"] as Tab["harnesses"]) : [],
   }));
-  return (
-    <>
+  const titleBar = (
     <TitleBar
       tabs={tabs}
       activeId={activeId}
@@ -63,10 +66,23 @@ function Fixture() {
         (window as unknown as { placed: string[] }).placed.push(id);
       }}
     />
-    <div data-pane-id="pane-1" style={{ height: 400 }} />
+  );
+  return (
+    <>
+      {titleBar}
+      <div data-pane-id="pane-1" style={{ height: 400 }} />
     </>
   );
 }
 
-Object.assign(window, { placed: [] });
+Object.assign(window, {
+  placed: [],
+  setFullscreen: async (next: boolean) => {
+    fullscreen = next;
+    await emit(TauriEvent.WINDOW_RESIZED, {
+      width: innerWidth,
+      height: innerHeight,
+    });
+  },
+});
 createRoot(document.getElementById("root")!).render(<Fixture />);

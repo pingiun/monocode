@@ -26,7 +26,6 @@ export type SettingsSectionId =
   | "providers"
   | "mcp"
   | "skills"
-  | "monos"
   | "inbox"
   | "worktrees"
   | "archive";
@@ -118,14 +117,6 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     keywords: "skill instructions prompt",
   },
   {
-    id: "monos",
-    group: "agents",
-    label: "Monos",
-    description:
-      "The resident agent beside your tabs, and which projects have one.",
-    keywords: "mono resident agent mascot claim project title bar",
-  },
-  {
     id: "inbox",
     group: "workspace",
     label: "Inbox",
@@ -186,25 +177,6 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     keywords: "claude tools connections oauth authenticate login add remove",
   },
   {
-    id: "monos-enabled",
-    section: "monos",
-    label: "Show monos",
-    keywords: "mono agent rail hide",
-  },
-  {
-    id: "rail-monos-pinned",
-    section: "monos",
-    label: "Pin monos to the icon rail",
-    keywords: "mono rail compact collapsed icons top divider project picker",
-  },
-  {
-    id: "mono-list",
-    section: "monos",
-    label: "Your monos",
-    keywords:
-      "mono reset soul name projects sessions sidebar visibility hidden show",
-  },
-  {
     id: "project-worktrees",
     section: "worktrees",
     label: "Project worktrees",
@@ -241,6 +213,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
           section: "general" as const,
           label: "Quick composer",
           keywords: "spotlight global shortcut hotkey floating prompt anywhere",
+        },
+        {
+          id: "mono-menu-bar-icon",
+          section: "general" as const,
+          label: "Menu bar icon",
+          keywords: "tray status quick composer macos",
         },
       ]
     : []),
@@ -370,6 +348,18 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     keywords: "scroll position sticky message",
   },
   {
+    id: "session-steps",
+    section: "chat",
+    label: "Step list in sessions",
+    keywords: "tasks todo plan progress checklist steps bar",
+  },
+  {
+    id: "paced-reveal",
+    section: "chat",
+    label: "Smooth text reveal",
+    keywords: "streaming pacing immediate latency performance animation",
+  },
+  {
     id: "follow-up",
     section: "chat",
     label: "Follow-up behavior",
@@ -437,6 +427,13 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     section: "providers",
     label: "Mask account emails",
     keywords: "email privacy blur hide screenshot account",
+  },
+  {
+    id: "claude-auto-compact",
+    section: "providers",
+    label: "Claude auto-compact window",
+    keywords:
+      "compact compaction context window tokens 1m 500k opus summarize autocompact",
   },
   {
     id: "claude-hooks",
@@ -778,6 +775,36 @@ export function saveComposerRunner(value: boolean) {
   );
 }
 
+const SESSION_STEPS_KEY = "monocode.sessionSteps";
+
+export const SESSION_STEPS_DEFAULT = true;
+
+/** Fired on `window` when the session step list setting flips. */
+export const SESSION_STEPS_CHANGE_EVENT = "monocode:session-steps-change";
+
+/**
+ * Whether every session is asked to work in visible steps and shows them
+ * pinned above its transcript, the way project threads do.
+ */
+export function loadSessionSteps(): boolean {
+  return readFlag(SESSION_STEPS_KEY) ?? SESSION_STEPS_DEFAULT;
+}
+
+export function saveSessionSteps(value: boolean) {
+  writeFlag(SESSION_STEPS_KEY, value);
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent<boolean>(SESSION_STEPS_CHANGE_EVENT, { detail: value }),
+  );
+}
+
+export function subscribeSessionSteps(onStoreChange: () => void) {
+  if (typeof window === "undefined") return () => {};
+  window.addEventListener(SESSION_STEPS_CHANGE_EVENT, onStoreChange);
+  return () =>
+    window.removeEventListener(SESSION_STEPS_CHANGE_EVENT, onStoreChange);
+}
+
 const NOTES_ENABLED_KEY = "monocode.notesEnabled";
 
 export const NOTES_ENABLED_DEFAULT = true;
@@ -802,33 +829,6 @@ export function subscribeNotesEnabled(onStoreChange: () => void) {
   window.addEventListener(NOTES_ENABLED_CHANGE_EVENT, onStoreChange);
   return () =>
     window.removeEventListener(NOTES_ENABLED_CHANGE_EVENT, onStoreChange);
-}
-
-const MONOS_ENABLED_KEY = "monocode.monosEnabled";
-
-export const MONOS_ENABLED_DEFAULT = true;
-
-/** Fired on `window` when monos are shown or hidden. */
-export const MONOS_ENABLED_CHANGE_EVENT = "monocode:monos-enabled-change";
-
-/** Whether monos show in the title bar at all, across every project. */
-export function loadMonosEnabled(): boolean {
-  return readFlag(MONOS_ENABLED_KEY) ?? MONOS_ENABLED_DEFAULT;
-}
-
-export function saveMonosEnabled(value: boolean) {
-  writeFlag(MONOS_ENABLED_KEY, value);
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(
-    new CustomEvent<boolean>(MONOS_ENABLED_CHANGE_EVENT, { detail: value }),
-  );
-}
-
-export function subscribeMonosEnabled(onStoreChange: () => void) {
-  if (typeof window === "undefined") return () => {};
-  window.addEventListener(MONOS_ENABLED_CHANGE_EVENT, onStoreChange);
-  return () =>
-    window.removeEventListener(MONOS_ENABLED_CHANGE_EVENT, onStoreChange);
 }
 
 const MONO_MENU_BAR_KEY = "monocode.monoMenuBarIcon";
@@ -1058,6 +1058,42 @@ export function saveClaudeHooks(value: boolean) {
   writeFlag(CLAUDE_HOOKS_KEY, value);
 }
 
+const CLAUDE_AUTO_COMPACT_WINDOW_KEY = "monocode.claudeAutoCompactWindow";
+
+/**
+ * Token windows Claude Code may auto-compact at. Claude Code clamps the
+ * window to the model's own, so only 1M-context models see the larger ones;
+ * 0 leaves the window to Claude Code.
+ */
+export const CLAUDE_AUTO_COMPACT_WINDOWS = [
+  0, 200_000, 300_000, 400_000, 500_000, 750_000,
+] as const;
+export type ClaudeAutoCompactWindow =
+  (typeof CLAUDE_AUTO_COMPACT_WINDOWS)[number];
+export const CLAUDE_AUTO_COMPACT_WINDOW_DEFAULT: ClaudeAutoCompactWindow = 500_000;
+
+export function loadClaudeAutoCompactWindow(): ClaudeAutoCompactWindow {
+  try {
+    const raw = Number(
+      localStorage.getItem(CLAUDE_AUTO_COMPACT_WINDOW_KEY) ?? NaN,
+    );
+    return (
+      CLAUDE_AUTO_COMPACT_WINDOWS.find((window) => window === raw) ??
+      CLAUDE_AUTO_COMPACT_WINDOW_DEFAULT
+    );
+  } catch {
+    return CLAUDE_AUTO_COMPACT_WINDOW_DEFAULT;
+  }
+}
+
+export function saveClaudeAutoCompactWindow(value: ClaudeAutoCompactWindow) {
+  try {
+    localStorage.setItem(CLAUDE_AUTO_COMPACT_WINDOW_KEY, String(value));
+  } catch {
+    // private mode / quota
+  }
+}
+
 const IDLE_AGENT_LIMIT_KEY = "monocode.idleAgentLimit";
 
 /** How many finished conversations keep their agent CLI warm. */
@@ -1123,7 +1159,8 @@ export const KEYBINDINGS: KeybindingRow[] = [
     when: "Always",
   },
   { command: "App: Switch Model", keys: `${MOD}.`, when: "Always" },
-  { command: "App: Toggle Mono", keys: `${MOD}I`, when: "Project with a mono" },
+  // The command keeps its id so saved shortcut overrides still apply.
+  { command: "App: Toggle Mono", keys: `${MOD}I`, when: "Claude Project" },
   {
     command: "Composer: Toggle Workspace",
     keys: `${MOD}${SHIFT}G`,
@@ -1290,15 +1327,20 @@ function defaultShortcutsFor(command: string): string[] {
 /** Chord to owning command, covering defaults, live overrides and Quick Composer. */
 function shortcutOwners(): Map<string, string> {
   const owners = new Map<string, string>();
+  const overrides = loadKeybindingOverrides();
   for (const row of KEYBINDINGS) {
     // The Quick Composer chord is stored separately from the table.
-    const chords =
-      row.command === QUICK_COMPOSER_COMMAND
-        ? [loadQuickComposerShortcut()]
-        : defaultShortcutsFor(row.command);
-    for (const chord of chords) owners.set(chord, row.command);
+    if (row.command === QUICK_COMPOSER_COMMAND) {
+      owners.set(loadQuickComposerShortcut(), row.command);
+      continue;
+    }
+    // A rebound or disabled command no longer holds its default chord.
+    if (overrides[row.command]) continue;
+    for (const chord of defaultShortcutsFor(row.command)) {
+      owners.set(chord, row.command);
+    }
   }
-  for (const [command, override] of Object.entries(loadKeybindingOverrides())) {
+  for (const [command, override] of Object.entries(overrides)) {
     if (override.shortcut) owners.set(override.shortcut, command);
   }
   return owners;

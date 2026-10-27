@@ -328,7 +328,7 @@ function upsertTaskList(
     (block) => block.role === "user",
   );
   const existing = lastMatchingBlock(session.blocks, (block, index) => {
-    if (block.role !== "tasks") return false;
+    if (event.fresh || block.role !== "tasks") return false;
     if (key) {
       if (block.taskList?.key !== key) return false;
       // A list from another provider conversation stays as history.
@@ -453,6 +453,7 @@ type UserTurnExtra = {
   monocode?: boolean;
   intent?: Block["intent"];
   appRequestId?: string;
+  forwardedBy?: string;
   monoSessionCompletion?: Block["monoSessionCompletion"];
 };
 
@@ -465,6 +466,7 @@ function userTurnFields(extra?: UserTurnExtra) {
     ...(extra?.monocode ? { monocode: true } : {}),
     ...(extra?.intent ? { intent: extra.intent } : {}),
     ...(extra?.appRequestId ? { appRequestId: extra.appRequestId } : {}),
+    ...(extra?.forwardedBy ? { forwardedBy: extra.forwardedBy } : {}),
     ...(extra?.monoSessionCompletion
       ? { monoSessionCompletion: extra.monoSessionCompletion }
       : {}),
@@ -712,13 +714,11 @@ function stopBlockProgress(block: Block): Block {
 }
 
 function stampTurnDuration(blocks: Block[], endedAt: number): Block[] {
-  // A steered message joined the run in flight; the run's clock started on
-  // the prompt it cut in on.
   let lastUser = -1;
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i];
-    if (block.role === "user" && (block.steered || block.sentAt != null))
-      continue;
+    // A message sent mid-turn joined it; the turn is timed from its start.
+    if (block.role === "user" && block.sentAt != null) continue;
     if (block.role === "user") {
       lastUser = i;
       break;
@@ -1057,6 +1057,7 @@ function upsertTool(
       kind,
       status,
       ...(detail ? { detail } : {}),
+      ...(!detail && prev.tool?.detailOmitted ? { detailOmitted: true } : {}),
       ...(preview ? { preview } : {}),
       ...(paths ? { paths } : {}),
       ...(prev.tool?.background ? { background: true } : {}),

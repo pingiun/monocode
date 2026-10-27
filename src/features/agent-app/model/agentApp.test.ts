@@ -148,22 +148,14 @@ describe("agent app commands", () => {
     },
   );
 
-  it("uses the owning Mono's preference when a habit starts a session", async () => {
+  it("keeps sessions a regular /operator thread starts in the sidebar", async () => {
     const { source, host } = fixture();
-    host.isHabitRun = () => true;
-    host.monoOf = () => ({
-      id: "mono",
-      projects: [source.cwd],
-      showStartedSessionsInSidebar: false,
-    });
-    await handleAgentApp(source, "habit-launch", "sessions.start", {
-      prompt: "Review the project",
+    await handleAgentApp(source, "operator-launch", "sessions.start", {
+      prompt: "Write an article",
       notifyOnComplete: false,
     }, host);
-    expect(host.start).toHaveBeenCalledWith(
-      expect.objectContaining({ sidebarHidden: true }),
-      "app-lead-habit-launch",
-    );
+    const launch = vi.mocked(host.start).mock.calls.at(-1)![0];
+    expect(launch.sidebarHidden).toBeUndefined();
   });
 
   it("files a Mono's sessions into a folder named after it", async () => {
@@ -318,18 +310,13 @@ describe("agent app commands", () => {
       expect(host.remove).not.toHaveBeenCalled();
     });
 
-    it("does not manage Mono chats, habit runs or orchestration workers", async () => {
+    it("does not manage Mono chats or orchestration workers", async () => {
       const { source, host } = fixture();
       host.isMono = () => true;
       await expect(
         handleAgentApp(source, "mono", action, { sessionId: "other" }, host),
       ).rejects.toThrow("Only regular project sessions");
       host.isMono = () => false;
-      host.isHabitRun = () => true;
-      await expect(
-        handleAgentApp(source, "habit", action, { sessionId: "other" }, host),
-      ).rejects.toThrow("Only regular project sessions");
-      host.isHabitRun = () => false;
       vi.mocked(host.session).mockResolvedValue({
         ...newSession("codex", source.cwd),
         id: "other",
@@ -445,9 +432,8 @@ describe("agent app commands", () => {
     );
   });
 
-  it.each([false, true])("leaves non-Mono launches unmonitored when habitRun=%s", async (habitRun) => {
+  it("leaves non-Mono launches unmonitored", async () => {
     const { source, host } = fixture();
-    host.isHabitRun = () => habitRun;
     const result = await handleAgentApp(
       source,
       "ordinary",
@@ -484,6 +470,21 @@ describe("agent app commands", () => {
       "app-lead-monitored-send",
       "lead",
     );
+  });
+
+  it("promises no completion report for a follow-up queued behind a busy turn", async () => {
+    const { source, host } = fixture();
+    host.isMono = (id) => id === source.id;
+    host.send = vi.fn(async () => ({ alreadySubmitted: false, queued: true }));
+    const result = await handleAgentApp(
+      source,
+      "queued-send",
+      "sessions.send",
+      { sessionId: "other", prompt: "Also this", notifyOnComplete: true },
+      host,
+    );
+    expect(result).toMatchObject({ submitted: true, queued: true });
+    expect(result).not.toHaveProperty("notifyOnComplete");
   });
 
   it.each([
@@ -1292,9 +1293,9 @@ describe("agent app commands", () => {
     expect(host.saveNote).not.toHaveBeenCalled();
   });
 
-  it("allows habit artifacts and recovers an attachment failure without saving twice", async () => {
+  it("recovers an artifact attachment failure without saving twice", async () => {
     const { source, host } = fixture();
-    host.isHabitRun = () => true;
+    host.isMono = () => true;
     let created: Artifact | null = null;
     host.artifact = vi.fn(async () => created);
     host.saveArtifact = vi.fn(async (input) => {
@@ -1305,7 +1306,7 @@ describe("agent app commands", () => {
       .fn()
       .mockRejectedValueOnce(new Error("Attachment failed"))
       .mockResolvedValue(undefined);
-    const input = { body: "# Habit report\n\nDetails" };
+    const input = { body: "# Report\n\nDetails" };
     await expect(
       handleAgentApp(source, "report", "artifacts.write", input, host),
     ).rejects.toThrow("Attachment failed");

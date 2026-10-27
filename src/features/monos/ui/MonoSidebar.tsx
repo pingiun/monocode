@@ -7,17 +7,15 @@ const MIN_WIDTH = 340;
 const DEFAULT_WIDTH = 400;
 let rememberedWidth = DEFAULT_WIDTH;
 
-/** The shared frame for a Mono's details and turn sidebars. */
+/** The frame of a project's overview panel beside its chat. */
 export function MonoSidebar({
   open,
-  kind,
   label,
   color,
   windowControls,
   children,
 }: {
   open: boolean;
-  kind: "details" | "sessions";
   label: string;
   color: string;
   windowControls?: ReactNode;
@@ -25,8 +23,7 @@ export function MonoSidebar({
 }) {
   const resize = useDragResize({
     min: MIN_WIDTH,
-    // The overview hosts whole sessions and documents, so it may grow wide;
-    // either way the chat keeps a good share.
+    // Wide enough for a diff when dragged; the chat keeps a good share.
     max: () => Math.min(960, Math.round(window.innerWidth * 0.62)),
     defaultWidth: DEFAULT_WIDTH,
     initial: rememberedWidth,
@@ -41,8 +38,7 @@ export function MonoSidebar({
       aria-label={label}
       aria-hidden={!open || undefined}
       inert={!open || undefined}
-      data-mono-details={kind === "details" ? "" : undefined}
-      data-mono-sessions={kind === "sessions" ? "" : undefined}
+      data-mono-details=""
       data-open={open}
       style={
         {
@@ -57,7 +53,7 @@ export function MonoSidebar({
       <div
         role="separator"
         aria-orientation="vertical"
-        aria-label={`Resize Mono ${kind}`}
+        aria-label="Resize overview"
         className={`absolute inset-y-0 -left-1 z-20 w-2 cursor-col-resize touch-none ${resize.dragging ? "bg-content/15" : "hover:bg-content/10"}`}
         onPointerDown={resize.onPointerDown}
         onDoubleClick={resize.onDoubleClick}

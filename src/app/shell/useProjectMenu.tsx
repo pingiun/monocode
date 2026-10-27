@@ -90,7 +90,7 @@ function projectMenuExtraItems(
   notificationReady: boolean,
   externalEditors: ExternalEditor[] | null,
   projectGroups: ProjectGroup[],
-  currentProjectGroupId?: string,
+  currentProjectGroupId: string | undefined,
 ): TabGroupMenuExtraItem[] {
   const groupSubmenu: ExplorerMenuItem[] = [
     { kind: "item", id: "project-group:new", label: "New group…" },

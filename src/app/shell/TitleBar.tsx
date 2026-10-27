@@ -39,12 +39,14 @@ import { TerminalSpinner } from "../../features/sessions/ui/TerminalSpinner";
 import { TabLabel } from "../../shared/ui/TabLabel";
 import { WindowControls } from "./WindowControls";
 import { PixelMascot } from "../../features/projects/ui/PixelMascot";
+import type { ThreadStatus } from "../../features/coordinator/model/coordinator";
 import {
   MONO_STATUS_LABEL,
   type MonoLook,
   type MonoState,
 } from "../../features/monos/model/mono";
 import { IS_MAC, IS_WIN, MOD, SHIFT } from "../../platform/tauri/platform";
+import { useTrafficLightsVisible } from "../../platform/tauri/useTrafficLightsVisible";
 import type { RecentProject } from "../../features/projects/model/recents";
 import {
   ExplorerMenu,
@@ -98,7 +100,12 @@ type Props = {
    * The Mono filling the main area. It takes the tabs' place, and nothing
    * project-scoped belongs beside it.
    */
-  mono?: { look: MonoLook; state: MonoState };
+  mono?: {
+    look: MonoLook;
+    state: MonoState;
+    /** The project's thread shown in its chat's place. */
+    thread?: { title: string; status: ThreadStatus };
+  };
   /** Shows or hides the Mono's overview panel beside its chat. */
   onToggleMonoOverview?: () => void;
   monoOverviewOpen?: boolean;
@@ -350,6 +357,8 @@ function TitleTabItem({
         title={accessibleTooltip}
         aria-label={accessibleTooltip}
         data-tauri-drag-region="false"
+        data-title-tab
+        data-title-tab-active={active || undefined}
         onClick={() => {
           if (sortable.consumeClick()) return;
           onSelect(tab.id);
@@ -597,6 +606,50 @@ export function TabVisitNav({
   );
 }
 
+/** A Mono's overview toggle and settings, beside its conversation. */
+function MonoViewActions({
+  name,
+  overviewOpen,
+  onToggleOverview,
+  onOpenSettings,
+  className = "",
+}: {
+  name: string;
+  overviewOpen: boolean;
+  onToggleOverview?: () => void;
+  onOpenSettings?: () => void;
+  className?: string;
+}) {
+  const label = overviewOpen ? "Hide overview" : "Show overview";
+  return (
+    <div className={`flex items-center gap-1 ${className}`}>
+      {onToggleOverview ? (
+        <button
+          type="button"
+          aria-pressed={overviewOpen}
+          title={label}
+          aria-label={label}
+          data-tauri-drag-region="false"
+          onClick={onToggleOverview}
+          className={`flex h-6 items-center gap-1.5 rounded-md px-2 text-[12px] ${
+            overviewOpen
+              ? "bg-content/10 text-content"
+              : "bg-content/5 text-content/70 hover:bg-content/8 hover:text-content"
+          }`}
+        >
+          <DashboardSquare className="size-3.5" strokeWidth={1.75} />
+          Overview
+        </button>
+      ) : null}
+      {onOpenSettings ? (
+        <IconButton label={`${name} settings`} onClick={onOpenSettings}>
+          <Settings className="size-3.5" strokeWidth={1.75} />
+        </IconButton>
+      ) : null}
+    </div>
+  );
+}
+
 /** Back + rail toggle for overlay surfaces when the project rail is closed. */
 export function OverlayNav({
   onBack,
@@ -659,53 +712,53 @@ function TitleBarComponent({
   recents = [],
   onSelectProject,
 }: Props) {
+  const trafficLightsVisible = useTrafficLightsVisible();
   const tabIds = tabs.map((tab) => tab.id);
-  const { displayed, setTabNode, finishMotion } = useTabCloseMotion(tabs);
+  const { displayed, tabNodeRef, finishMotion } = useTabCloseMotion(tabs);
   const tabStripRef = useRef<HTMLDivElement | null>(null);
   const paneDropArmed = useRef(false);
-  const externalTabDrop = useMemo<ReorderExternalDrop<string> | undefined>(
-    () => {
-      // A sideways drag sags, so only a deliberate pull below the tab bar
-      // targets a pane. Once armed it stays armed until the pointer is back
-      // over the tabs.
-      const pulledBelowTabs = (event: PointerEvent) => {
-        const bottom = tabStripRef.current?.getBoundingClientRect().bottom ?? 0;
-        if (event.clientY <= bottom) paneDropArmed.current = false;
-        else if (event.clientY >= bottom + PANE_DROP_PULL)
-          paneDropArmed.current = true;
-        return paneDropArmed.current;
-      };
-      return onPlaceOnPane
-        ? {
-            onMove: (tabId, event) => {
-              if (tabId === activeId || !pulledBelowTabs(event)) {
-                setExternalPaneDrop(null);
-                return false;
-              }
-              const over = paneDropFromPoint(event.clientX, event.clientY);
-              setExternalPaneDrop({
-                fromId: tabId,
-                overId: over?.id ?? null,
-                edge: over?.edge ?? "left",
-              });
-              return over != null;
-            },
-            onDrop: (tabId, event) => {
-              if (tabId === activeId || !pulledBelowTabs(event)) return false;
-              const over = paneDropFromPoint(event.clientX, event.clientY);
-              if (!over) return false;
-              onPlaceOnPane(tabId, over.id, over.edge);
-              return true;
-            },
-            onEnd: () => {
-              paneDropArmed.current = false;
+  const externalTabDrop = useMemo<
+    ReorderExternalDrop<string> | undefined
+  >(() => {
+    // A sideways drag sags, so only a deliberate pull below the tab bar
+    // targets a pane. Once armed it stays armed until the pointer is back
+    // over the tabs.
+    const pulledBelowTabs = (event: PointerEvent) => {
+      const bottom = tabStripRef.current?.getBoundingClientRect().bottom ?? 0;
+      if (event.clientY <= bottom) paneDropArmed.current = false;
+      else if (event.clientY >= bottom + PANE_DROP_PULL)
+        paneDropArmed.current = true;
+      return paneDropArmed.current;
+    };
+    return onPlaceOnPane
+      ? {
+          onMove: (tabId, event) => {
+            if (tabId === activeId || !pulledBelowTabs(event)) {
               setExternalPaneDrop(null);
-            },
-          }
-        : undefined;
-    },
-    [activeId, onPlaceOnPane],
-  );
+              return false;
+            }
+            const over = paneDropFromPoint(event.clientX, event.clientY);
+            setExternalPaneDrop({
+              fromId: tabId,
+              overId: over?.id ?? null,
+              edge: over?.edge ?? "left",
+            });
+            return over != null;
+          },
+          onDrop: (tabId, event) => {
+            if (tabId === activeId || !pulledBelowTabs(event)) return false;
+            const over = paneDropFromPoint(event.clientX, event.clientY);
+            if (!over) return false;
+            onPlaceOnPane(tabId, over.id, over.edge);
+            return true;
+          },
+          onEnd: () => {
+            paneDropArmed.current = false;
+            setExternalPaneDrop(null);
+          },
+        }
+      : undefined;
+  }, [activeId, onPlaceOnPane]);
   const sortable = useAnimatedReorder(tabIds, onReorder, "x", externalTabDrop);
   const paneToTabDrop = useExternalTitleTabDrop();
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
@@ -920,33 +973,13 @@ function TitleBarComponent({
     (!IS_MAC && !hideWindowControls) ? (
       <div className="flex h-full shrink-0 items-stretch">
         {mono && (onToggleMonoOverview || onOpenMonoSettings) ? (
-          <div className="flex items-center gap-1 px-3">
-            {onToggleMonoOverview ? (
-              <button
-                type="button"
-                aria-pressed={monoOverviewOpen}
-                title={monoOverviewOpen ? "Hide overview" : "Show overview"}
-                data-tauri-drag-region="false"
-                onClick={onToggleMonoOverview}
-                className={`flex h-6 items-center gap-1.5 rounded-md px-2 text-[12px] ${
-                  monoOverviewOpen
-                    ? "bg-content/10 text-content"
-                    : "bg-content/5 text-content/70 hover:bg-content/8 hover:text-content"
-                }`}
-              >
-                <DashboardSquare className="size-3.5" strokeWidth={1.75} />
-                Overview
-              </button>
-            ) : null}
-            {onOpenMonoSettings ? (
-              <IconButton
-                label={`${mono.look.name} settings`}
-                onClick={onOpenMonoSettings}
-              >
-                <Settings className="size-3.5" strokeWidth={1.75} />
-              </IconButton>
-            ) : null}
-          </div>
+          <MonoViewActions
+            name={mono.look.name}
+            overviewOpen={monoOverviewOpen}
+            onToggleOverview={onToggleMonoOverview}
+            onOpenSettings={onOpenMonoSettings}
+            className="px-3"
+          />
         ) : null}
         {showTrailingActions ? (
           <div className="flex items-center gap-0.5 px-2">
@@ -985,7 +1018,9 @@ function TitleBarComponent({
         <div
           data-compact-title-nav
           // A full Mono's title bar starts beside the 48px compact rail.
-          className={`flex shrink-0 items-center ${mono ? "pl-[22px]" : "pl-[70px]"}`}
+          className={`flex shrink-0 items-center ${
+            trafficLightsVisible ? (mono ? "pl-[22px]" : "pl-[70px]") : "pl-1.5"
+          }`}
         >
           <TabVisitNav
             canGoBack={canGoBack}
@@ -997,9 +1032,13 @@ function TitleBarComponent({
       ) : null}
       {/* Both the rail and the sidebar step aside without a project, so the
           title bar takes over the traffic lights and the rail toggle. */}
-      {projectless && railClosed && !compactRail ? (
+      {/* An open project's sidebar carries them instead, when it shows. */}
+      {projectless &&
+      railClosed &&
+      !compactRail &&
+      !(mono && sessionSidebarOpen) ? (
         <>
-          <div className="w-[78px] shrink-0" />
+          {trafficLightsVisible ? <div className="w-[78px] shrink-0" /> : null}
           <div className="flex shrink-0 items-center px-1.5">
             <IconButton
               label={`Toggle Sidebar (${MOD}B)`}
@@ -1012,7 +1051,7 @@ function TitleBarComponent({
       ) : null}
       {!sessionSidebarOpen && !projectless && onToggleSessionSidebar ? (
         <div className="flex shrink-0 items-center px-1.5">
-          {IS_MAC && railClosed && !compactRail ? (
+          {trafficLightsVisible && railClosed && !compactRail ? (
             <div className="w-[70px] shrink-0" />
           ) : null}
           <IconButton
@@ -1042,7 +1081,7 @@ function TitleBarComponent({
         }`}
       >
         {mono ? (
-          <MonoTitle look={mono.look} state={mono.state} />
+          <MonoTitle look={mono.look} state={mono.state} thread={mono.thread} />
         ) : (
           <div
             className="relative h-full min-w-0 flex-1 overflow-hidden"
@@ -1069,9 +1108,7 @@ function TitleBarComponent({
                 const tab = entry.item;
                 const shell = (
                   <div
-                    ref={(el) => {
-                      if (!entry.closing) setTabNode(tab.id, el);
-                    }}
+                    ref={entry.closing ? undefined : tabNodeRef(tab.id)}
                     className={
                       entry.closing || entry.opening
                         ? "relative flex h-full w-full min-w-0 overflow-hidden items-center"
@@ -1167,8 +1204,26 @@ function TitleBarComponent({
 
 export const TitleBar = memo(TitleBarComponent);
 
-/** In a Mono's view the title bar names it and shows its status. */
-function MonoTitle({ look, state }: { look: MonoLook; state: MonoState }) {
+const THREAD_STATUS_TEXT: Record<ThreadStatus, string> = {
+  waiting: "Waiting for you",
+  busy: "Working",
+  inactive: "Idle",
+  solved: "Solved",
+};
+
+/**
+ * In a project's view the title bar names it and shows its status, or the
+ * thread shown in its chat's place and that thread's.
+ */
+function MonoTitle({
+  look,
+  state,
+  thread,
+}: {
+  look: MonoLook;
+  state: MonoState;
+  thread?: { title: string; status: ThreadStatus };
+}) {
   return (
     <div
       data-mono-title
@@ -1181,17 +1236,44 @@ function MonoTitle({ look, state }: { look: MonoLook; state: MonoState }) {
         still={state.status === "idle"}
         className="size-4 shrink-0"
       />
-      <span className="min-w-0 truncate text-[13px] font-medium text-content">
-        {look.name}
-      </span>
       <span
-        data-mono-status={state.status}
-        className={`shrink-0 text-[12px] ${
-          state.status === "needs-you" ? "text-accent" : "text-content/45"
+        className={`min-w-0 truncate text-[13px] font-medium ${
+          thread ? "max-w-[40%] shrink-0 text-content/55" : "text-content"
         }`}
       >
-        {MONO_STATUS_LABEL[state.status]}
+        {look.name}
       </span>
+      {thread ? (
+        <>
+          <ChevronRight
+            aria-hidden
+            className="size-3 shrink-0 text-content/35"
+          />
+          <span
+            data-thread-title
+            className="min-w-0 truncate text-[13px] font-medium text-content"
+          >
+            {thread.title}
+          </span>
+          <span
+            data-thread-status={thread.status}
+            className={`shrink-0 text-[12px] ${
+              thread.status === "waiting" ? "text-amber-400" : "text-content/45"
+            }`}
+          >
+            {THREAD_STATUS_TEXT[thread.status]}
+          </span>
+        </>
+      ) : (
+        <span
+          data-mono-status={state.status}
+          className={`shrink-0 text-[12px] ${
+            state.status === "needs-you" ? "text-accent" : "text-content/45"
+          }`}
+        >
+          {MONO_STATUS_LABEL[state.status]}
+        </span>
+      )}
     </div>
   );
 }

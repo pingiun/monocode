@@ -1,4 +1,12 @@
 import { GripVertical, X } from "../../../shared/ui/icons";
+import { LiveThreadLink, threadLinkId } from "../../coordinator/ui/ThreadLink";
+import { ThreadStepsBar } from "../../coordinator/ui/ThreadStepsBar";
+import {
+  coordinatorCompactAt,
+  coordinatorContextUsage,
+  threadSteps,
+} from "../../coordinator/model/coordinator";
+import { useSessionSnapshot } from "../model/sessionStateStore";
 import {
   memo,
   useCallback,
@@ -9,7 +17,9 @@ import {
   useSyncExternalStore,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
+import { useStableValue } from "../../../shared/hooks/useStableValue";
 import { Composer } from "./Composer";
 import {
   RunningSubagents,
@@ -74,6 +84,7 @@ import {
 } from "../model/transcriptJump";
 import { EmptySession } from "./EmptySession";
 import {
+  isCoordinatorProject,
   monoForSession,
   monoLook,
   monosSnapshot,
@@ -108,7 +119,10 @@ import {
 import { createNote, noteTitle } from "../../notes";
 import {
   loadNotesEnabled,
+  loadSessionSteps,
+  SESSION_STEPS_DEFAULT,
   subscribeNotesEnabled,
+  subscribeSessionSteps,
 } from "../../settings/model/settings";
 import { getComposerDraft, setComposerDraft } from "../model/draftCache";
 import { resolveModel } from "../model/models";
@@ -163,12 +177,18 @@ export type SessionPaneProps = {
     blocks: Block[],
     launchedId: string,
   ) => void;
+  /** Opens a thread a project coordinator's chat links to. */
+  onOpenProjectThread?: (sessionId: string) => void;
   /** Live status of the sessions this Mono launched, by id. */
   monoLaunchedSessions?: ReadonlyMap<string, LaunchedSessionView>;
   /** The launched session open in the Mono's sidebar. */
   openMonoSessionId?: string;
+  /** Shows plan usage by a Mono's composer; off where a footer shows it. */
+  monoComposerUsage?: boolean;
   recents: RecentProject[];
   hideProjectPicker?: boolean;
+  /** The pane sits under a header that already pins the step list. */
+  hideSteps?: boolean;
   onFocus: (sessionId: string) => void;
   onClose: (sessionId: string) => void;
   onCwdChange: (sessionId: string, cwd: string) => void;
@@ -194,6 +214,7 @@ export type SessionPaneProps = {
     attachments: Attachment[],
     options?: ComposerTurnOptions,
   ) => boolean | void;
+  onRunBashCommand?: (sessionId: string, command: string) => void;
   onSaveDraft: (
     sessionId: string,
     text: string,
@@ -294,7 +315,9 @@ type Props = SessionPaneProps & {
   allowedModelHarnesses?: readonly HarnessId[];
 };
 
-export const SessionPane = memo(function SessionPane(props: SessionPaneProps) {
+export const SessionPane = memo(function SessionPane(input: SessionPaneProps) {
+  const session = useSessionSnapshot(input.session, input.visible);
+  const props = session === input.session ? input : { ...input, session };
   // Sessions in a project on another machine render this same pane, backed by
   // the host instead of this computer's session runtime.
   if (isRemoteProjectPath(props.session.cwd))
@@ -329,6 +352,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
   composerFocusToken,
   recents,
   hideProjectPicker,
+  hideSteps,
   onFocus,
   onClose,
   onCwdChange,
@@ -343,6 +367,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
   onSaveDraft,
   onRemoveDraft,
   onSubmit,
+  onRunBashCommand,
   onStop,
   onStopBackgroundTask,
   onCompactContext,
@@ -375,6 +400,8 @@ const LocalSessionPane = memo(function LocalSessionPane({
   onOpenMonoSession,
   monoLaunchedSessions,
   openMonoSessionId,
+  monoComposerUsage = true,
+  onOpenProjectThread,
   onOpenPlan,
   onBuildPlan,
   onSecondOpinion,
@@ -439,6 +466,41 @@ const LocalSessionPane = memo(function LocalSessionPane({
   useSyncExternalStore(subscribeMonos, monosSnapshot);
   const mono = monoForSession(session.id);
   const agent = mono ? monoLook(mono) : undefined;
+  const sessionStepsEnabled = useSyncExternalStore(
+    subscribeSessionSteps,
+    loadSessionSteps,
+    () => SESSION_STEPS_DEFAULT,
+  );
+  // The session's task list, pinned above the transcript like a thread's.
+  const steps = useStableValue(
+    useMemo(
+      () =>
+        sessionStepsEnabled && !agent && !hideSteps
+          ? threadSteps(session.blocks)
+          : undefined,
+      [sessionStepsEnabled, agent, hideSteps, session.blocks],
+    ),
+  );
+  const coordinator = isCoordinatorProject(mono);
+  // The threads it names in its replies link to them, with their status.
+  const renderThreadLink = useMemo(
+    () =>
+      coordinator
+        ? (href: string, children: ReactNode) => {
+            const sessionId = threadLinkId(href);
+            if (!sessionId) return undefined;
+            return (
+              <LiveThreadLink
+                sessionId={sessionId}
+                onOpenThread={onOpenProjectThread}
+              >
+                {children}
+              </LiveThreadLink>
+            );
+          }
+        : undefined,
+    [coordinator, onOpenProjectThread],
+  );
   // A Mono shows only its own background, never the project's or the app's.
   const projectBackground = mono
     ? monoChatBackground(mono.id)
@@ -497,9 +559,13 @@ const LocalSessionPane = memo(function LocalSessionPane({
   // A delegated run swapped in for the transcript from the composer dock.
   const [viewedSubagentId, setViewedSubagentId] = useState<string | null>(null);
   useEffect(() => setViewedSubagentId(null), [session.id]);
-  const liveSubagents = useMemo(
-    () => (session.busy ? runningSubagents(session.blocks) : []),
-    [session.busy, session.blocks],
+  // Recomputed per streamed update, but the dock, the runner and the memos
+  // below only see a new list when the runs themselves change.
+  const liveSubagents = useSameItems(
+    useMemo(
+      () => (session.busy ? runningSubagents(session.blocks) : NO_BLOCKS),
+      [session.busy, session.blocks],
+    ),
   );
   const viewedSubagent = viewedSubagentId
     ? session.blocks.find((block) => block.id === viewedSubagentId)
@@ -529,7 +595,14 @@ const LocalSessionPane = memo(function LocalSessionPane({
     () => subagentBackgroundTasks(session.backgroundTasks ?? [], subagentRuns),
     [session.backgroundTasks, subagentRuns],
   );
-  const subagentTaskIds = new Set(subagentTasks.values());
+  const subagentTaskIds = useMemo(
+    () => new Set(subagentTasks.values()),
+    [subagentTasks],
+  );
+  const stoppableSubagents = useMemo(
+    () => new Set(subagentTasks.keys()),
+    [subagentTasks],
+  );
   const runnerCompanions = useMemo(
     () =>
       liveSubagents.map((block) => ({
@@ -538,12 +611,14 @@ const LocalSessionPane = memo(function LocalSessionPane({
       })),
     [liveSubagents],
   );
-  const runnerSignalsNow = useMemo(
-    () =>
-      session.busy
-        ? runnerSignals(session.blocks, session.pendingQuestion != null)
-        : NO_RUNNER_SIGNALS,
-    [session.busy, session.blocks, session.pendingQuestion],
+  const runnerSignalsNow = useStableValue(
+    useMemo(
+      () =>
+        session.busy
+          ? runnerSignals(session.blocks, session.pendingQuestion != null)
+          : NO_RUNNER_SIGNALS,
+      [session.busy, session.blocks, session.pendingQuestion],
+    ),
   );
   // Approvals and questions only show in Main, so a run waiting on one must
   // not leave the reader looking somewhere else.
@@ -848,6 +923,11 @@ const LocalSessionPane = memo(function LocalSessionPane({
         setViewedSubagentId(null);
         return onSubmit(session.id, text, attachments, options);
       }}
+      onRunBashCommand={
+        onRunBashCommand
+          ? (command) => onRunBashCommand(session.id, command)
+          : undefined
+      }
       onBtwCommand={btw.openWith}
       onStop={() => onStop(session.id)}
       backgroundTasks={
@@ -863,6 +943,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
       subagents={
         subagentRuns.length ? (
           <RunningSubagents
+            visible={visible}
             runs={subagentRuns}
             liveIds={liveSubagentIds}
             viewedId={viewedSubagent ? viewedSubagent.id : null}
@@ -872,7 +953,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
               if (blockId === null || !needsAnswer)
                 setViewedSubagentId(blockId);
             }}
-            stoppable={new Set(subagentTasks.keys())}
+            stoppable={stoppableSubagents}
             onStop={
               onStopBackgroundTask &&
               !remote &&
@@ -916,6 +997,12 @@ const LocalSessionPane = memo(function LocalSessionPane({
         onUsageLimitResumeAtReset(session.id, enabled)
       }
       onUsageLimitDismiss={() => onUsageLimitDismiss(session.id)}
+      providerAccountId={session.providerAccountId}
+      onUsageLimitAccountChange={
+        onUsageLimitAccountChange
+          ? (accountId) => onUsageLimitAccountChange(session.id, accountId)
+          : undefined
+      }
       onOpenFile={onOpenFile}
       busy={!!session.busy}
       editLastTurnSupported={editLastTurnSupported}
@@ -958,6 +1045,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
       ) : null}
       {inSplit ? (
         <div
+          data-split-header=""
           className={`flex h-9 shrink-0 touch-none items-center gap-1.5 border-b border-stroke px-2 select-none ${
             onPaneDragStart ? "cursor-grab active:cursor-grabbing" : ""
           }`}
@@ -1005,9 +1093,12 @@ const LocalSessionPane = memo(function LocalSessionPane({
       ) : null}
       <div className="flex min-h-0 min-w-0 flex-1">
         <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+          {steps && !isEmpty && !viewedSubagent ? (
+            <ThreadStepsBar steps={steps} busy={!!session.busy} />
+          ) : null}
           <div
             ref={transcriptScope}
-            className={`@container relative min-h-0 flex-1${
+            className={`relative min-h-0 flex-1${
               dockComposer && !agent ? " transcript-composer-fade" : ""
             }`}
           >
@@ -1045,7 +1136,11 @@ const LocalSessionPane = memo(function LocalSessionPane({
             {remoteSessionLoading ? null : isEmpty ? (
               agent ? (
                 <div className="scrollbar-none h-full min-h-0 overflow-y-auto">
-                  <MonoHeader agent={agent} greeting />
+                  <MonoHeader
+                    agent={agent}
+                    greeting
+                    coordinator={coordinator}
+                  />
                 </div>
               ) : session.inboxAsk ? (
                 <div className="scrollbar-none h-full min-h-0 overflow-y-auto">
@@ -1091,6 +1186,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
                             )
                           : monoTranscript.blocks
                       }
+                      sessionId={remoteSession ? undefined : session.id}
                       historicalBlockIds={monoTranscript.historicalBlockIds}
                       initialTurns={agent ? MONO_PAGE_TURNS : undefined}
                       pageSize={agent ? MONO_PAGE_TURNS : undefined}
@@ -1106,6 +1202,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
                       }
                       busy={!!session.busy && !monoTranscript.viewingOlderPage}
                       visible={visible}
+                      renderLink={renderThreadLink}
                       cwd={workCwd}
                       agentName={agent?.name}
                       onOpenArtifact={
@@ -1114,8 +1211,13 @@ const LocalSessionPane = memo(function LocalSessionPane({
                           : undefined
                       }
                       agentMascot={agent}
-                      bottomAligned={!!agent}
+                      // A project's coordinator reads like a session: each
+                      // message starts at the top, the reply scrolls under it.
+                      bottomAligned={!!agent && !coordinator}
                       inlineWork={!!agent}
+                      // Its threads report back often: each reply to a
+                      // report reads as a message of its own.
+                      separateReplies={coordinator}
                       messageDeliveries={agent ? messageDeliveries : undefined}
                       onRetryMessage={
                         agent ? () => onResumeQueue(session.id) : undefined
@@ -1199,7 +1301,8 @@ const LocalSessionPane = memo(function LocalSessionPane({
                         !session.inboxAsk &&
                         !session.worktreeRemoved &&
                         onHandoff
-                          ? (target, turn) => onHandoff(session.id, target, turn)
+                          ? (target, turn) =>
+                              onHandoff(session.id, target, turn)
                           : undefined
                       }
                       onJumpToBottomChange={jumpVisibility.setVisible}
@@ -1209,7 +1312,8 @@ const LocalSessionPane = memo(function LocalSessionPane({
                       onScrollerChange={setTranscriptScroller}
                       editingLastTurn={editingLastTurn}
                       onEditLastTurn={
-                        editLastTurnSupported && !monoTranscript.viewingOlderPage
+                        editLastTurnSupported &&
+                        !monoTranscript.viewingOlderPage
                           ? () => {
                               onFocus(session.id);
                               recallLastTurnRef.current?.();
@@ -1217,7 +1321,9 @@ const LocalSessionPane = memo(function LocalSessionPane({
                           : undefined
                       }
                       latestTurnAccessory={
-                        !showChangedFilesCard || reviewHidden || agent ? undefined : (
+                        !showChangedFilesCard ||
+                        reviewHidden ||
+                        agent ? undefined : (
                           <SessionReview
                             sessionId={session.id}
                             editedPaths={editedPaths}
@@ -1249,6 +1355,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     <SubagentTranscript
                       key={viewedSubagent.id}
                       block={viewedSubagent}
+                      sessionId={remoteSession ? undefined : session.id}
                       cwd={workCwd}
                       live={liveSubagentIds.has(viewedSubagent.id)}
                       onOpenFile={onOpenFile}
@@ -1272,12 +1379,14 @@ const LocalSessionPane = memo(function LocalSessionPane({
                   />
                 ) : null}
                 {/* One mark per message would crowd a Mono's endless chat. */}
-                {agent ? null : (
+                {/* Main's prompts mean nothing over a subagent's transcript,
+                    and would scroll that one instead. */}
+                {agent || viewedSubagent ? null : (
                   <PromptOutline
                     blocks={session.blocks}
                     scope={transcriptScope}
                     scroller={transcriptScroller}
-                    visible={visible && !viewedSubagent}
+                    visible={visible}
                     revealBlock={revealBlock}
                   />
                 )}
@@ -1347,6 +1456,11 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     key={session.id}
                     sessionId={session.id}
                     name={agent.name}
+                    placeholder={
+                      coordinator
+                        ? "Ask the coordinator or start a task…"
+                        : undefined
+                    }
                     enabled={visible}
                     quoteRequest={quoteRequest}
                     onQuoteRequestConsumed={acknowledgeQuote}
@@ -1367,20 +1481,22 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     // with the usage-limit notice, not here. A narrow chat
                     // drops it first, then shows the model controls as icons.
                     tools={
-                      <div className="flex shrink-0 items-center gap-0.5 text-[11px] text-content/55 @max-md:hidden">
-                        <UsageChips
-                          providers={monoUsageProviders(session.harness)}
-                          session={{
-                            id: session.id,
-                            harness: session.harness,
-                            model: session.model,
-                            providerAccountId: session.providerAccountId,
-                          }}
-                          project={session.cwd}
-                          accountPicker={false}
-                          variant="composer"
-                        />
-                      </div>
+                      monoComposerUsage ? (
+                        <div className="flex shrink-0 items-center gap-0.5 text-[11px] text-content/55 @max-md:hidden">
+                          <UsageChips
+                            providers={monoUsageProviders(session.harness)}
+                            session={{
+                              id: session.id,
+                              harness: session.harness,
+                              model: session.model,
+                              providerAccountId: session.providerAccountId,
+                            }}
+                            project={session.cwd}
+                            accountPicker={false}
+                            variant="composer"
+                          />
+                        </div>
+                      ) : undefined
                     }
                     controls={
                       <>
@@ -1415,7 +1531,17 @@ const LocalSessionPane = memo(function LocalSessionPane({
                             its current thread is. It rotates threads itself,
                             so there is nothing to compact here. */}
                         <div className="grid size-6.5 place-items-center rounded-md transition-colors hover:bg-content/8">
-                          <ContextMeter usage={session.context} empty={isEmpty} />
+                          <ContextMeter
+                            usage={
+                              coordinator
+                                ? coordinatorContextUsage(
+                                    session.context,
+                                    coordinatorCompactAt(mono?.compactAt),
+                                  )
+                                : session.context
+                            }
+                            empty={isEmpty}
+                          />
                         </div>
                       </>
                     }
@@ -1453,4 +1579,19 @@ function monoUsageProviders(harness: HarnessId): RateLimitProvider[] {
     harness === "devin"
     ? [harness]
     : [];
+}
+
+const NO_BLOCKS: Block[] = [];
+
+/** The previous array while it holds the same items, so memos keyed on it hold. */
+function useSameItems<T>(items: T[]): T[] {
+  const previous = useRef(items);
+  const current = previous.current;
+  if (
+    current !== items &&
+    (current.length !== items.length ||
+      current.some((item, index) => item !== items[index]))
+  )
+    previous.current = items;
+  return previous.current;
 }

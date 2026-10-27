@@ -465,6 +465,8 @@ export function InboxView({
   const [jiraProjects, setJiraProjects] = useState<JiraProject[]>([]);
   const prevRefresh = useRef(refresh);
 
+  // Fetches cover every project, sharing the background poll's cache, so
+  // switching projects is instant.
   const projects = useMemo(
     () => inboxProjectsForRail(recents, cwd),
     [cwd, recents],
@@ -473,7 +475,10 @@ export function InboxView({
     () => inboxProjectOptions(projects, logos),
     [logos, projects],
   );
-  const linearProjects = useMemo(() => linearProjectOptions(items), [items]);
+  const linearProjects = useMemo(
+    () => linearProjectOptions(items),
+    [items],
+  );
   const activeFilters = useMemo(
     () =>
       pruneInboxFilters(
@@ -1142,6 +1147,7 @@ export function InboxView({
       className="flex min-h-0 min-w-0 flex-1 flex-col text-content"
     >
       <div
+        data-app-view-header
         className="flex h-10 shrink-0 select-none items-center border-b border-stroke"
         data-tauri-drag-region="deep"
       >

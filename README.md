@@ -36,11 +36,9 @@ Open a project folder, choose an agent, and send a message. Each tab is a sessio
 - Edit files and review changes in the app.
 - Start a message with `/operator` to let an agent open sessions and manage worktrees and notes.
 
-Monos are experimental agents that work across your projects. They keep a memory and can run scheduled tasks you set up with them.
-
 MonoCode is still early. If something breaks, [report a bug](https://github.com/hardbeat920/monocode/issues).
 
-## Artifact previews
+### Artifact previews
 
 Claude Code runs in MonoCode through its CLI, and MonoCode does not have the Claude.ai Artifacts panel. For standalone `html` and `svg` code fences in an agent reply, MonoCode offers a **Preview** button alongside the source and copy control. Previews run in an isolated frame with scripts and external resources disabled. Interactive web apps can be created as project files and run with the project's normal dev server.
 

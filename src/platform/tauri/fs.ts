@@ -1,6 +1,6 @@
 import { invoke as invokeLocal } from "@tauri-apps/api/core";
 import { open, save } from "@tauri-apps/plugin-dialog";
-import { slash } from "../../shared/lib/paths";
+import { joinPath, slash } from "../../shared/lib/paths";
 import { REMOTE_PATH_PREFIX } from "../../shared/lib/remotePaths";
 import type { InterjectionMeta } from "../../features/sessions/model/session";
 
@@ -194,7 +194,7 @@ export type GitDiffStats = {
 };
 
 export function gitDiffStats(cwd: string): Promise<GitDiffStats> {
-  return invoke<GitDiffStats>("git_diff_stats", { cwd });
+  return readGit<GitDiffStats>("git_diff_stats", cwd);
 }
 
 export type GitChangedFile = {
@@ -222,13 +222,58 @@ export type GitDiffIndex = {
   headPushed: boolean;
 };
 
+const pendingGitReads = new Map<string, Promise<unknown>>();
+let gitReadEpoch = 0;
+// The last result of each read, handed to listeners reacting to its own
+// publication (see notifyGitChanged), which would otherwise read it again.
+const settledGitReads = new Map<
+  string,
+  { epoch: number; at: number; result: unknown }
+>();
+/** The one read being published, while its listeners run. */
+let sharedRead: string | null = null;
+const SHARED_READ_MAX_AGE_MS = 1000;
+
+/** Share concurrent reads, and never resolve with a pre-mutation snapshot. */
+function readGit<T>(command: string, cwd: string): Promise<T> {
+  const key = `${command}\0${cwd}`;
+  const pending = pendingGitReads.get(key);
+  if (pending) return pending as Promise<T>;
+  if (sharedRead === key) {
+    const settled = settledGitReads.get(key);
+    if (
+      settled?.epoch === gitReadEpoch &&
+      Date.now() - settled.at < SHARED_READ_MAX_AGE_MS
+    )
+      return Promise.resolve(settled.result as T);
+  }
+  const epoch = gitReadEpoch;
+  const request = invoke<T>(command, { cwd })
+    .then(
+      (result) => {
+        if (epoch !== gitReadEpoch) return readGit<T>(command, cwd);
+        settledGitReads.set(key, { epoch, at: Date.now(), result });
+        return result;
+      },
+      (error) => {
+        if (epoch !== gitReadEpoch) return readGit<T>(command, cwd);
+        throw error;
+      },
+    )
+    .finally(() => {
+      if (pendingGitReads.get(key) === request) pendingGitReads.delete(key);
+    });
+  pendingGitReads.set(key, request);
+  return request;
+}
+
 export function gitDiffIndex(cwd: string): Promise<GitDiffIndex> {
-  return invoke<GitDiffIndex>("git_diff_index", { cwd });
+  return readGit<GitDiffIndex>("git_diff_index", cwd);
 }
 
 /** File list and counts only, for diff content views that do not need sync data. */
 export function gitDiffFiles(cwd: string): Promise<GitDiffIndex> {
-  return invoke<GitDiffIndex>("git_diff_files", { cwd });
+  return readGit<GitDiffIndex>("git_diff_files", cwd);
 }
 
 export type GitFileDiff = {
@@ -453,14 +498,64 @@ export function isCheckoutBlockedByChanges(message: string): boolean {
 
 const GIT_CHANGED = "monocode-git-changed";
 
-/** Tell git UIs (diff pane, branch picker) to reload after a local git mutation. */
-export function notifyGitChanged() {
-  window.dispatchEvent(new Event(GIT_CHANGED));
+/**
+ * Tell git UIs (diff pane, branch picker) to reload after a local git mutation.
+ * `workingTreeOnly` marks a change seen only in the working tree, such as an
+ * agent editing files: branches, worktrees and history cannot have moved.
+ */
+export function notifyGitChanged({
+  invalidatePending = true,
+  workingTreeOnly = false,
+  publishedIndexCwd,
+}: {
+  invalidatePending?: boolean;
+  workingTreeOnly?: boolean;
+  /** The checkout whose git_diff_index this notification publishes. */
+  publishedIndexCwd?: string;
+} = {}) {
+  // Publishing an already-read index is not a mutation. All actual mutations
+  // invalidate both new readers and original callers still awaiting old data.
+  if (invalidatePending) {
+    gitReadEpoch++;
+    pendingGitReads.clear();
+    settledGitReads.clear();
+  }
+  // Publishing a read just made: listeners that read it again in response
+  // get that result rather than spawning git for the same answer.
+  // Only that read, just made, is shared; any other read still goes to git,
+  // since changes made outside the app never advance the epoch.
+  sharedRead =
+    !invalidatePending && publishedIndexCwd
+      ? `git_diff_index\0${publishedIndexCwd}`
+      : null;
+  try {
+    window.dispatchEvent(
+      new CustomEvent(GIT_CHANGED, { detail: { workingTreeOnly } }),
+    );
+  } finally {
+    sharedRead = null;
+  }
 }
 
-export function subscribeGitChanged(listener: () => void): () => void {
-  window.addEventListener(GIT_CHANGED, listener);
-  return () => window.removeEventListener(GIT_CHANGED, listener);
+/**
+ * `refsOnly` listeners skip working-tree-only changes. While agents edit
+ * files those arrive every poll, and each reload spawns several git processes.
+ */
+export function subscribeGitChanged(
+  listener: () => void,
+  { refsOnly = false } = {},
+): () => void {
+  const handle = (event: Event) => {
+    if (
+      refsOnly &&
+      (event as CustomEvent<{ workingTreeOnly?: boolean }>).detail
+        ?.workingTreeOnly
+    )
+      return;
+    listener();
+  };
+  window.addEventListener(GIT_CHANGED, handle);
+  return () => window.removeEventListener(GIT_CHANGED, handle);
 }
 
 export function createPath(
@@ -630,6 +725,19 @@ export type StreamableVideo = {
 /** Let the asset protocol stream this one video file from disk. */
 export function allowVideoFile(path: string): Promise<StreamableVideo> {
   return invoke<StreamableVideo>("allow_video_file", { path });
+}
+
+/**
+ * Bytes of an image a project's Markdown document shows. `path` is relative to
+ * `root`, and the file is read only if it resolves inside `root`, symlinks
+ * included. A connected machine already keeps every read inside its projects.
+ */
+export function readProjectImage(root: string, path: string): Promise<Uint8Array> {
+  if (root.startsWith(REMOTE_PATH_PREFIX))
+    return readBinaryFile(joinPath(root, path));
+  return invokeLocal<ArrayBuffer>("read_project_image", { root, path }).then(
+    (buffer) => new Uint8Array(buffer),
+  );
 }
 
 export type GeneratedImageAsset = {

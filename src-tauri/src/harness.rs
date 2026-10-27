@@ -156,6 +156,7 @@ struct LiveChild {
     cwd: PathBuf,
     stdin: Mutex<ChildStdin>,
     pid: u32,
+    identity: Option<String>,
     account: Option<HarnessAccount>,
 }
 
@@ -212,6 +213,19 @@ impl HarnessHost {
 
     fn get(&self, session_id: &str) -> Option<Arc<LiveChild>> {
         self.lock_inner().children.get(session_id).cloned()
+    }
+
+    pub(crate) fn process_roots(&self) -> Vec<crate::resources::ProcessRoot> {
+        self.lock_inner()
+            .children
+            .iter()
+            .map(|(id, child)| crate::resources::ProcessRoot {
+                session_id: id.clone(),
+                pid: child.pid,
+                identity: child.identity.clone(),
+                cwd: child.cwd.to_string_lossy().into_owned(),
+            })
+            .collect()
     }
 
     /// Stamp this spawn and drop any child already registered under the id.
@@ -983,6 +997,7 @@ pub fn harness_spawn(
         cwd: workdir.clone(),
         stdin: Mutex::new(stdin),
         pid,
+        identity: crate::resources::identity(pid),
         account,
     });
     if let Some(rejected) = host.install_spawn(session_id.clone(), epoch, kill_all, live) {
@@ -1116,6 +1131,39 @@ pub(crate) fn provider_account_path(
         .join(account_id))
 }
 
+/// The API endpoint a Claude account uses instead of a claude.ai sign-in,
+/// if any. The token stays on the host.
+#[tauri::command(async)]
+pub fn provider_account_endpoint(
+    app: AppHandle,
+    account_id: String,
+) -> Result<Option<crate::account_sync::ClaudeEndpoint>, String> {
+    let dir = provider_account_path(&app, "claude", &account_id)?;
+    Ok(crate::account_sync::claude_account_endpoint(&dir))
+}
+
+/// Set up a Claude account to use an API endpoint and token instead of a
+/// claude.ai sign-in. An empty token keeps the current one, and an empty
+/// usage URL means the gateway reports no usage.
+#[tauri::command(async)]
+pub fn provider_account_set_endpoint(
+    app: AppHandle,
+    account_id: String,
+    base_url: String,
+    token: String,
+    usage_url: String,
+) -> Result<(), String> {
+    let dir = provider_account_path(&app, "claude", &account_id)?;
+    crate::account_sync::set_claude_account_endpoint(&dir, &base_url, &token, &usage_url)
+}
+
+/// Take a Claude account off its API endpoint, back to a claude.ai sign-in.
+#[tauri::command(async)]
+pub fn provider_account_clear_endpoint(app: AppHandle, account_id: String) -> Result<(), String> {
+    let dir = provider_account_path(&app, "claude", &account_id)?;
+    crate::account_sync::clear_claude_account_endpoint(&dir)
+}
+
 #[tauri::command(async)]
 pub fn provider_account_remove(
     app: AppHandle,
@@ -1176,6 +1224,9 @@ fn apply_provider_account(
                     eprintln!("[harness] Account config sync skipped: {error}");
                 }
             }
+            // An account left idle for a few hours starts on an expired token,
+            // and its claude.ai connectors then come up as needing sign-in.
+            crate::rate_limits::renew_expired_claude_sign_in(&dir);
             // Claude scopes both its ordinary config and its macOS Keychain
             // credential to these exact strings. Setting both keeps profiles
             // isolated on every supported platform.
@@ -1528,6 +1579,226 @@ pub(crate) fn exec_output(
     }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BashModeResult {
+    stdout: String,
+    stderr: String,
+    exit_code: Option<i32>,
+    timed_out: bool,
+}
+
+/// A command run long enough to probably be a mistake (or a `watch`/server the
+/// user forgot bash mode is not a terminal), not a sign the real work is done.
+const BASH_MODE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const BASH_MODE_OUTPUT_EVENT: &str = "bash-mode-output";
+/// One webview hop per stream per tick, however chatty the command is.
+const BASH_MODE_FLUSH: Duration = Duration::from_millis(50);
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct BashModeOutput {
+    id: String,
+    stream: &'static str,
+    data: String,
+}
+
+/// How much of each end of a stream is kept; `tree /` can print gigabytes.
+const BASH_MODE_KEEP: usize = 512 * 1024;
+
+/// The head streams live (held back at a split UTF-8 character); past it only
+/// a rolling tail is kept, so the finished run shows both ends.
+#[derive(Default)]
+struct BashModeStream {
+    unsent: Vec<u8>,
+    head: Vec<u8>,
+    tail: Vec<u8>,
+    total: u64,
+}
+
+impl BashModeStream {
+    fn push(&mut self, bytes: &[u8]) {
+        self.total += bytes.len() as u64;
+        let room = BASH_MODE_KEEP
+            .saturating_sub(self.head.len())
+            .min(bytes.len());
+        let (head, rest) = bytes.split_at(room);
+        self.head.extend_from_slice(head);
+        self.unsent.extend_from_slice(head);
+        self.tail.extend_from_slice(rest);
+        if self.tail.len() > 2 * BASH_MODE_KEEP {
+            self.tail.drain(..self.tail.len() - BASH_MODE_KEEP);
+        }
+    }
+
+    fn text(&self) -> String {
+        let tail = &self.tail[self.tail.len().saturating_sub(BASH_MODE_KEEP)..];
+        let dropped = self.total - (self.head.len() + tail.len()) as u64;
+        let head = String::from_utf8_lossy(&self.head);
+        let tail = String::from_utf8_lossy(tail);
+        if dropped == 0 {
+            format!("{head}{tail}")
+        } else {
+            format!("{head}\n\n... [{dropped} bytes not kept] ...\n\n{tail}")
+        }
+    }
+
+    fn take_text(&mut self, done: bool) -> String {
+        let valid = if done {
+            self.unsent.len()
+        } else {
+            match std::str::from_utf8(&self.unsent) {
+                Ok(_) => self.unsent.len(),
+                Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                Err(_) => self.unsent.len(),
+            }
+        };
+        let text = String::from_utf8_lossy(&self.unsent[..valid]).into_owned();
+        self.unsent.drain(..valid);
+        text
+    }
+}
+
+fn bash_mode_reader(
+    mut source: impl Read + Send + 'static,
+    stream: Arc<Mutex<BashModeStream>>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buf = [0_u8; 8192];
+        loop {
+            match source.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    stream
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(&buf[..n]);
+                }
+            }
+        }
+    })
+}
+
+fn bash_mode_flush(
+    app: &AppHandle,
+    id: &str,
+    streams: &[(&'static str, &Arc<Mutex<BashModeStream>>)],
+    done: bool,
+) {
+    for (name, stream) in streams {
+        let data = stream
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .take_text(done);
+        if !data.is_empty() {
+            let _ = app.emit(
+                BASH_MODE_OUTPUT_EVENT,
+                BashModeOutput {
+                    id: id.to_string(),
+                    stream: name,
+                    data,
+                },
+            );
+        }
+    }
+}
+
+/// The Composer's `!command` bash mode: the user's own typed command, run in
+/// their default shell exactly like a terminal would, with no allowlist —
+/// unlike `harness_exec`, which only ever runs a configured provider CLI.
+/// Output streams as `bash-mode-output` events while it runs.
+#[tauri::command]
+pub async fn bash_mode_exec(
+    app: AppHandle,
+    id: String,
+    command: String,
+    cwd: Option<String>,
+) -> Result<BashModeResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let (shell, mut args) = crate::pty::default_shell();
+        #[cfg(windows)]
+        {
+            if shell.to_lowercase().ends_with("powershell.exe") {
+                args.push("-Command".into());
+            } else {
+                args.push("/C".into());
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            args.push("-c".into());
+        }
+        args.push(command);
+
+        let mut cmd = Command::new(&shell);
+        cmd.args(&args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        prepare_child(&mut cmd, &shell);
+        if let Some(dir) = cwd.as_deref() {
+            let workdir = expand_home(dir);
+            if workdir.is_dir() {
+                cmd.current_dir(workdir);
+            }
+        }
+        let mut child =
+            spawn_managed(&mut cmd).map_err(|e| format!("Failed to run {shell}: {e}"))?;
+        let pid = child.id();
+        let stdout = Arc::new(Mutex::new(BashModeStream::default()));
+        let stderr = Arc::new(Mutex::new(BashModeStream::default()));
+        let readers = [
+            child
+                .stdout
+                .take()
+                .map(|pipe| bash_mode_reader(pipe, stdout.clone())),
+            child
+                .stderr
+                .take()
+                .map(|pipe| bash_mode_reader(pipe, stderr.clone())),
+        ];
+        let streams = [("stdout", &stdout), ("stderr", &stderr)];
+
+        let started = Instant::now();
+        let mut timed_out = false;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {}
+                Err(e) => return Err(format!("Failed to run {shell}: {e}")),
+            }
+            if started.elapsed() >= BASH_MODE_TIMEOUT {
+                timed_out = true;
+                terminate(pid);
+                break child.wait().ok();
+            }
+            bash_mode_flush(&app, &id, &streams, false);
+            thread::sleep(BASH_MODE_FLUSH);
+        };
+        // A backgrounded child (`server &`) can hold the pipes open forever;
+        // give the readers a moment to drain, then stop waiting on them.
+        let drained = Instant::now();
+        while readers.iter().flatten().any(|reader| !reader.is_finished())
+            && drained.elapsed() < Duration::from_millis(500)
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        bash_mode_flush(&app, &id, &streams, true);
+
+        let text = |stream: &Arc<Mutex<BashModeStream>>| {
+            stream.lock().unwrap_or_else(|e| e.into_inner()).text()
+        };
+        Ok(BashModeResult {
+            stdout: text(&stdout),
+            stderr: text(&stderr),
+            exit_code: status.and_then(|status| status.code()),
+            timed_out,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 const KILL_ESCALATE: Duration = Duration::from_secs(2);
 /// Quit and `Drop` cannot wait on a detached escalate thread — the process
 /// exits first and isolated harness groups stay behind as PID-1 orphans.
@@ -1551,6 +1822,7 @@ const SPAWN_CANCELLED: &str = "Harness start was cancelled";
 /// harness spawn goes through here, probes included: a `--help` probe that
 /// hangs is a `node` process too, and an unmarked one is unreapable.
 fn isolate_child(cmd: &mut Command) {
+    crate::background_work::configure_child(cmd);
     cmd.env(HARNESS_PARENT_ENV, std::process::id().to_string());
     #[cfg(unix)]
     {
@@ -2870,6 +3142,24 @@ fn path_has_component(path: &Path, needle: &str) -> bool {
     })
 }
 
+/// `name` as found on `path`, absolute. std only uses `posix_spawn` when the
+/// program needs no lookup in an overridden PATH; otherwise it forks the whole
+/// app, which pauses every thread of a large process for each short-lived
+/// child. Falls back to the bare name, which still resolves the slow way.
+pub(crate) fn program_on_path(name: &str, path: &str) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        if let Some(found) = std::env::split_paths(path)
+            .map(|dir| dir.join(name))
+            .find(|candidate| candidate.is_absolute() && is_executable_file(candidate))
+        {
+            return found.into_os_string();
+        }
+    }
+    let _ = path;
+    name.into()
+}
+
 fn is_executable_file(path: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -3194,6 +3484,7 @@ mod tests {
                 cwd: PathBuf::from("/test"),
                 stdin: Mutex::new(stdin),
                 pid,
+                identity: crate::resources::identity(pid),
                 account: None,
             }),
             child,
@@ -3355,6 +3646,7 @@ mod tests {
                 cwd: PathBuf::from("/test"),
                 stdin: Mutex::new(stdin),
                 pid,
+                identity: crate::resources::identity(pid),
                 account: None,
             }),
             child,
@@ -4306,5 +4598,36 @@ mod reap_logic_tests {
         assert!(!is_legacy_orphaned_cursor_acp(
             "node /usr/local/bin/typescript-language-server --stdio"
         ));
+    }
+}
+
+#[cfg(test)]
+mod bash_mode_tests {
+    use super::BashModeStream;
+
+    #[test]
+    fn holds_back_a_character_split_across_reads() {
+        let mut stream = BashModeStream::default();
+        let bytes = "hé".as_bytes();
+        stream.unsent.extend_from_slice(&bytes[..2]);
+        assert_eq!(stream.take_text(false), "h");
+        stream.unsent.extend_from_slice(&bytes[2..]);
+        assert_eq!(stream.take_text(false), "é");
+        assert!(stream.unsent.is_empty());
+    }
+
+    #[test]
+    fn keeps_both_ends_of_huge_output() {
+        use super::BASH_MODE_KEEP;
+        let mut stream = BashModeStream::default();
+        stream.push(&vec![b'a'; BASH_MODE_KEEP]);
+        stream.push(&vec![b'b'; 3 * BASH_MODE_KEEP]);
+        stream.push(b"end");
+        let text = stream.text();
+        assert!(text.starts_with('a'));
+        assert!(text.ends_with("bend"));
+        assert!(text.contains(&format!("[{} bytes not kept]", 2 * BASH_MODE_KEEP + 3)));
+        assert!(text.len() < 2 * BASH_MODE_KEEP + 100);
+        assert_eq!(stream.unsent.len(), BASH_MODE_KEEP);
     }
 }

@@ -15,6 +15,7 @@ import {
   groupTurnItems,
   groupTurns,
   hasRunningSubagent,
+  joinedTurnStart,
   initialThinkingIndex,
   lastActivityIndex,
   liveRunStartIndex,
@@ -145,6 +146,23 @@ describe("groupMonoChatTurns", () => {
       ["thanks", "welcome"],
       ["review", "cancelled"],
       ["tests", "tests-done"],
+    ]);
+  });
+
+  it("gives each reply its own message when asked to keep them apart", () => {
+    const blocks: Block[] = [
+      { id: "thanks", role: "user", text: "thanks :)", startedAt: at },
+      note("welcome", "You're welcome!"),
+      completion("review", at + 3 * minute),
+      note("cancelled", "The review was cancelled."),
+    ];
+    expect(
+      groupMonoChatTurns(blocks, false, true).map((turn) =>
+        turn.map((block) => block.id),
+      ),
+    ).toEqual([
+      ["thanks", "welcome"],
+      ["review", "cancelled"],
     ]);
   });
 
@@ -735,6 +753,35 @@ describe("groupTurns", () => {
       ["h1"],
       ["u2"],
     ]);
+  });
+});
+
+describe("joinedTurnStart", () => {
+  it("times messages sent mid-turn from the turn they joined", () => {
+    const turns = groupTurns([
+      { id: "u1", role: "user", text: "go", startedAt: 1_000 },
+      { id: "a1", role: "assistant", text: "working" },
+      { id: "s1", role: "user", text: "also this", sentAt: 5_000 },
+      { id: "s2", role: "user", text: "and this", sentAt: 6_000 },
+      { id: "a2", role: "assistant", text: "on it" },
+    ]);
+    expect(
+      turns.map((turn) => joinedTurnStart(turns, turns.indexOf(turn))),
+    ).toEqual([1_000, 1_000, 1_000]);
+  });
+
+  it("does not reach across a handoff or into a turn without a start", () => {
+    const handoff = groupTurns([
+      { id: "u1", role: "user", text: "go", startedAt: 1_000 },
+      { id: "h1", role: "handoff", text: "Goal: go" },
+      { id: "s1", role: "user", text: "also", sentAt: 5_000 },
+    ]);
+    expect(joinedTurnStart(handoff, 2)).toBeUndefined();
+    const plain = groupTurns([
+      { id: "u1", role: "user", text: "old turn" },
+      { id: "s1", role: "user", text: "also", sentAt: 5_000 },
+    ]);
+    expect(joinedTurnStart(plain, 1)).toBeUndefined();
   });
 });
 

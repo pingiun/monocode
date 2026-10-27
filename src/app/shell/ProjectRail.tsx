@@ -14,7 +14,13 @@ import {
   Settings,
   Zap,
 } from "../../shared/ui/icons";
-import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import { useDragResize } from "../../shared/hooks/useDragResize";
 import { useLockOverscroll } from "../../shared/hooks/useLockOverscroll";
 import { useProjectDiffStats } from "../../features/source-control/hooks/useProjectDiffStats";
@@ -28,7 +34,8 @@ import {
   saveProjectRailWidth,
 } from "../../features/settings/model/appearance";
 import { basename, type GitDiffStats } from "../../platform/tauri/fs";
-import { IS_MAC, MOD } from "../../platform/tauri/platform";
+import { MOD } from "../../platform/tauri/platform";
+import { useTrafficLightsVisible } from "../../platform/tauri/useTrafficLightsVisible";
 import { formatInteger } from "../../shared/lib/numbers";
 import { pathKey, projectKey, projectName } from "../../shared/lib/paths";
 import {
@@ -87,7 +94,10 @@ import {
 } from "../../features/connections/model/connections";
 import { remoteProjectFor } from "../../features/connections/model/remoteProjects";
 import { useProjectMenu } from "./useProjectMenu";
-import { MonoRailSection, type MonoRailProps } from "./MonoRailSection";
+import {
+  CoordinatorRailSection,
+  type CoordinatorRailProps,
+} from "./CoordinatorRailSection";
 
 type Props = {
   visible?: boolean;
@@ -124,8 +134,8 @@ type Props = {
   updateNotice?: InstalledUpdate | null;
   onOpenWhatsNew?: (version: string) => void;
   onDismissUpdate?: () => void;
-  /** The Monos section above the projects; absent while Monos are off. */
-  monos?: MonoRailProps;
+  /** The Claude Projects section above the projects; absent while it is off. */
+  coordinators?: CoordinatorRailProps;
 };
 
 export function ProjectRail({
@@ -163,8 +173,9 @@ export function ProjectRail({
   updateNotice = null,
   onOpenWhatsNew,
   onDismissUpdate,
-  monos,
+  coordinators,
 }: Props) {
+  const trafficLightsVisible = useTrafficLightsVisible();
   const resize = useDragResize({
     min: PROJECT_RAIL_WIDTH_MIN,
     max: () =>
@@ -333,7 +344,7 @@ export function ProjectRail({
     inboxActive ||
     notesActive ||
     automationsActive ||
-    !!monos?.activeId;
+    !!coordinators?.activeId;
   const pinnedIds = sections.pinned.map((item) => item.path);
   const projectIds = groupedProjectSections.ungrouped.map((item) => item.path);
   const groupIds = groupedProjectSections.grouped.map(({ group }) => group.id);
@@ -354,7 +365,7 @@ export function ProjectRail({
         className="flex h-10 shrink-0 select-none items-center pr-1.5"
         data-tauri-drag-region="deep"
       >
-        {IS_MAC ? <div className="w-[78px] shrink-0" /> : null}
+        {trafficLightsVisible ? <div className="w-[78px] shrink-0" /> : null}
         <DevModeSlot />
         <TabVisitNav
           canGoBack={canGoBack}
@@ -425,7 +436,7 @@ export function ProjectRail({
             }}
             className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none pb-2"
           >
-            {monos ? <MonoRailSection {...monos} /> : null}
+            {coordinators ? <CoordinatorRailSection {...coordinators} /> : null}
 
             {sections.pinned.length > 0 ? (
               <ProjectSection

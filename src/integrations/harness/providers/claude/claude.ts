@@ -6,7 +6,10 @@ import type {
   TaskListItem,
   TaskListMeta,
 } from "../../../../features/sessions/model/session";
-import { loadClaudeHooks } from "../../../../features/settings/model/settings";
+import {
+  loadClaudeAutoCompactWindow,
+  loadClaudeHooks,
+} from "../../../../features/settings/model/settings";
 import {
   killChild,
   resolveClaudeBinary,
@@ -41,6 +44,7 @@ import {
   isTerminalAgentTaskStatus,
   isTodoTool,
   applyClaudeTaskTool,
+  claudeTaskListFinished,
   isUsageLimitResult,
   normalizeClaudeCliEffort,
   parseBackgroundTasks,
@@ -944,16 +948,28 @@ function handleUser(live: Live, rec: Record<string, unknown>): void {
       preview: previewFromTool(tool.name, tool.input, result.text),
       ...artifactTitleField(tool.name, tool.input),
     });
+    // A step added once every step is done or dropped starts a new list,
+    // so the list follows the work at hand instead of growing for good.
+    const fresh =
+      !result.isError &&
+      tool.name.trim() === "TaskCreate" &&
+      claudeTaskListFinished(live.claudeTasks);
+    const tasks = fresh ? new Map<string, TaskListItem>() : live.claudeTasks;
     if (
       !result.isError &&
-      applyClaudeTaskTool(live.claudeTasks, tool.name, tool.input, result.text)
+      applyClaudeTaskTool(tasks, tool.name, tool.input, result.text)
     ) {
+      if (fresh) {
+        live.claudeTasks.clear();
+        for (const [id, task] of tasks) live.claudeTasks.set(id, task);
+      }
       live.onEvent({
         type: "tasks.updated",
         key: CLAUDE_TASKS_KEY,
         // The map is the source of truth, so a TaskUpdate subject is a rename.
         authoritative: true,
         providerSessionId: live.claudeSessionId,
+        ...(fresh ? { fresh: true } : {}),
         items: [...live.claudeTasks.values()],
       });
     }
@@ -1233,16 +1249,25 @@ function handleAgentLifecycle(
       toolUseId: started.toolUseId,
       agent: isAgentTaskType(started.taskType),
     });
-    if (!isAgentTaskType(started.taskType)) {
+    // A subagent's own subagents work inside its run; a row of their own
+    // would sit under Main with nothing to close it once the parent ends.
+    if (!isAgentTaskType(started.taskType) || started.nested) {
       syncBackgroundWait(live);
       return true;
     }
     live.agentTasks.set(started.taskId, {
       taskId: started.taskId,
+      // A task listed first already has its row; only the Agent call that
+      // spawned it takes over. A resumed run names the SendMessage that woke
+      // it, and moving there would strand that row as a run that never ends.
       toolUseId:
-        started.toolUseId ??
+        (isAgentCall(live, started.toolUseId)
+          ? started.toolUseId
+          : undefined) ??
         existingTask?.toolUseId ??
-        unclaimedAgentCall(live, started.description),
+        started.toolUseId ??
+        unclaimedAgentCall(live, started.description) ??
+        agentRowId(started.description),
       description: started.description,
       backgrounded: started.backgrounded,
     });
@@ -1259,12 +1284,22 @@ function handleAgentLifecycle(
   const progress = parseTaskProgress(rec);
   if (progress) {
     const task = live.agentTasks.get(progress.taskId);
+    // Progress names no parent, so a task this turn never started or listed
+    // (a nested subagent, or one from before the turn began) only updates a
+    // row that already exists. Opening one here leaves a run that never ends.
+    if (
+      !task &&
+      !(progress.toolUseId && live.toolsById.has(progress.toolUseId))
+    )
+      return true;
     if (task && !task.toolUseId) {
       task.toolUseId =
         progress.toolUseId ?? unclaimedAgentCall(live, task.description);
       if (task.toolUseId) syncBackgroundWait(live);
     }
-    const title = progress.description || task?.description || "Subagent";
+    // Progress can describe the step in flight rather than the run; the row
+    // keeps the name it started with.
+    const title = task?.description || progress.description || "Subagent";
     const detail =
       progress.summary ||
       progress.lastToolName ||
@@ -1342,7 +1377,9 @@ function handleAgentLifecycle(
       });
     }
   }
-  const liveTasks = allTasks.filter((task) => isAgentTaskType(task.taskType));
+  const liveTasks = allTasks.filter(
+    (task) => isAgentTaskType(task.taskType) && !task.nested,
+  );
   for (const id of [...live.agentTasks.keys()]) {
     if (!next.has(id)) completeAgentTask(live, id, "completed");
   }
@@ -1350,7 +1387,8 @@ function handleAgentLifecycle(
     if (live.agentTasks.has(row.taskId)) continue;
     // The list carries no tool_use_id and often lands before task_started, so
     // find the Agent call that spawned it rather than opening a second row.
-    const toolUseId = unclaimedAgentCall(live, row.description);
+    const toolUseId =
+      unclaimedAgentCall(live, row.description) ?? agentRowId(row.description);
     live.agentTasks.set(row.taskId, {
       taskId: row.taskId,
       toolUseId,
@@ -1528,6 +1566,16 @@ function unclaimedAgentCall(
   return match;
 }
 
+function isAgentCall(live: Live, toolUseId: string | undefined): boolean {
+  const tool = toolUseId ? live.toolsById.get(toolUseId) : undefined;
+  return !!tool && isAgentToolName(tool.name);
+}
+
+/** The row a task gets when no Agent call in this turn spawned it. */
+function agentRowId(description: string): string {
+  return `agent:${description}`;
+}
+
 function upsertAgentTool(
   live: Live,
   callId: string | undefined,
@@ -1535,7 +1583,7 @@ function upsertAgentTool(
   status: string,
   detail?: string,
 ): void {
-  const id = callId ?? `agent:${title}`;
+  const id = callId ?? agentRowId(title);
   const existing = live.toolsById.get(id);
   if (!existing) {
     live.toolsById.set(id, {
@@ -1827,6 +1875,7 @@ function settingsKeyFor(input: HarnessSessionInput): string {
     context: input.modelSettings?.context,
     runtimeMode: input.runtimeMode,
     hooks: loadClaudeHooks(),
+    autoCompactWindow: loadClaudeAutoCompactWindow(),
   })}`;
 }
 
@@ -1857,6 +1906,14 @@ function launchOptions(
   }
   if (!loadClaudeHooks()) {
     settings.disableAllHooks = true;
+  }
+  // The env var outranks the per-model window `/autocompact` saves, so the
+  // MonoCode setting holds in every session.
+  const autoCompactWindow = loadClaudeAutoCompactWindow();
+  if (autoCompactWindow > 0) {
+    settings.env = {
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: String(autoCompactWindow),
+    };
   }
   return {
     model: resolveClaudeApiModelId(native, context),

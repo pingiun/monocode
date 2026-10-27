@@ -33,6 +33,14 @@ export const MONO_COLORS = [
  */
 export type Mono = {
   id: string;
+  /**
+   * A project coordinator rather than a Mono of its own: it lives in the
+   * rail's Claude Projects section, works on one folder, and hands the work
+   * to threads (see `features/coordinator`).
+   */
+  kind?: "project";
+  /** A project's coordinator starts fresh past this many tokens. */
+  compactAt?: number;
   /** Its conversation; absent until it is first opened. */
   sessionId?: string;
   /** Replaces the mascot's own name. */
@@ -158,6 +166,10 @@ function parseMono(value: unknown): Mono | undefined {
   const legacyProject = text("legacyProject");
   return {
     id: entry.id,
+    ...(entry.kind === "project" ? { kind: "project" as const } : {}),
+    ...(typeof entry.compactAt === "number" && Number.isFinite(entry.compactAt)
+      ? { compactAt: entry.compactAt }
+      : {}),
     ...(sessionId ? { sessionId } : {}),
     ...(name ? { name } : {}),
     mascot: text("mascot") ?? PROJECT_MASCOTS[0].name,
@@ -179,9 +191,77 @@ function parseMono(value: unknown): Mono | undefined {
 /** Every Mono, in the order the rail shows them. */
 export function listMonos(): Mono[] {
   migrateLegacyMonoStorage();
-  const parsed = readJson(ROSTER_KEY);
-  if (!Array.isArray(parsed)) return [];
-  return parsed.flatMap((entry) => parseMono(entry) ?? []);
+  let raw: string | null = null;
+  try {
+    raw = localStorage.getItem(ROSTER_KEY);
+  } catch {
+    raw = null;
+  }
+  // Looked up several times per render (and per session in the sidebar):
+  // parse the roster once per saved version. The same objects come back
+  // until it changes, so memos keyed on a Mono hold; callers never mutate.
+  if (!rosterCache || rosterCache.raw !== raw) {
+    let parsed: unknown;
+    try {
+      parsed = raw ? (JSON.parse(raw) as unknown) : undefined;
+    } catch {
+      parsed = undefined;
+    }
+    rosterCache = {
+      raw,
+      monos: Array.isArray(parsed)
+        ? parsed.flatMap((entry) => parseMono(entry) ?? [])
+        : [],
+    };
+  }
+  return [...rosterCache.monos];
+}
+
+let rosterCache: { raw: string | null; monos: Mono[] } | null = null;
+
+/** Monos of their own, without the project coordinators. */
+export function listAgentMonos(): Mono[] {
+  return listMonos().filter((mono) => mono.kind !== "project");
+}
+
+/** The project coordinators, in the order the rail shows them. */
+export function listCoordinatorProjects(): Mono[] {
+  return listMonos().filter((mono) => mono.kind === "project");
+}
+
+export function isCoordinatorProject(
+  mono: Pick<Mono, "kind"> | undefined,
+): boolean {
+  return mono?.kind === "project";
+}
+
+/** Whether this conversation is a project coordinator's. */
+export function isCoordinatorSession(sessionId: string): boolean {
+  return isCoordinatorProject(monoForSession(sessionId));
+}
+
+/**
+ * A new project coordinator for one folder, named by the user. Its standing
+ * instructions are seeded into SOUL.md the first time its files load.
+ */
+export function createCoordinatorProject(input: {
+  name: string;
+  path: string;
+  instructions?: string;
+}): Mono {
+  const roster = listMonos();
+  const mono: Mono = {
+    id: newMonoId(),
+    kind: "project",
+    name: input.name.trim(),
+    ...nextMonoLook(roster),
+    projects: uniqueProjects([input.path]),
+    ...(input.instructions?.trim()
+      ? { instructions: input.instructions.trim() }
+      : {}),
+  };
+  saveRoster([...roster, mono]);
+  return mono;
 }
 
 function saveRoster(roster: readonly Mono[]): void {
@@ -227,18 +307,6 @@ export function nextMonoLook(
   };
 }
 
-/** A new Mono with the next look, starting with the projects given, if any. */
-export function createMono(projects: readonly string[] = []): Mono {
-  const roster = listMonos();
-  const mono: Mono = {
-    id: newMonoId(),
-    ...nextMonoLook(roster),
-    projects: uniqueProjects(projects),
-  };
-  saveRoster([...roster, mono]);
-  return mono;
-}
-
 const OPEN_MONO_KEY = "monocode:open-mono";
 
 /** The Mono whose conversation was open, so the next launch reopens it. */
@@ -256,6 +324,39 @@ export function saveOpenMono(monoId: string | undefined): void {
     else localStorage.removeItem(OPEN_MONO_KEY);
   } catch {
     // The next launch opens the workspace instead; harmless.
+  }
+}
+
+const SHOWN_THREAD_KEY = "monocode:mono-shown-thread";
+
+function readShownThreads(): Record<string, string> {
+  try {
+    const parsed: unknown = JSON.parse(
+      localStorage.getItem(SHOWN_THREAD_KEY) ?? "{}",
+    );
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed)
+      ? (parsed as Record<string, string>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+/** The thread a Mono last showed over its overview, to open on next time. */
+export function loadShownThread(monoId: string): string | null {
+  const id = readShownThreads()[monoId];
+  return typeof id === "string" && id ? id : null;
+}
+
+export function saveShownThread(monoId: string, sessionId: string | null) {
+  const threads = readShownThreads();
+  if ((threads[monoId] ?? null) === sessionId) return;
+  if (sessionId) threads[monoId] = sessionId;
+  else delete threads[monoId];
+  try {
+    localStorage.setItem(SHOWN_THREAD_KEY, JSON.stringify(threads));
+  } catch {
+    // The Mono opens on its list instead; harmless.
   }
 }
 
@@ -291,15 +392,18 @@ export function removeMono(id: string): void {
   saveRoster(listMonos().filter((mono) => mono.id !== id));
 }
 
+/**
+ * Puts the given Monos in this order. Given only some, as a project's list
+ * is, they swap among their own places and the rest stay where they are.
+ */
 export function reorderMonos(ids: readonly string[]): void {
   const roster = listMonos();
-  const order = new Map(ids.map((id, index) => [id, index]));
+  const byId = new Map(roster.map((mono) => [mono.id, mono]));
+  const ordered = ids.flatMap((id) => byId.get(id) ?? []);
+  const moved = new Set(ordered.map((mono) => mono.id));
+  let next = 0;
   saveRoster(
-    [...roster].sort(
-      (a, b) =>
-        (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) -
-        (order.get(b.id) ?? Number.MAX_SAFE_INTEGER),
-    ),
+    roster.map((mono) => (moved.has(mono.id) ? ordered[next++]! : mono)),
   );
 }
 
@@ -313,27 +417,6 @@ export function saveMonoName(monoId: string, name: string): void {
 
 export function saveMonoMascot(monoId: string, mascot: string): void {
   updateMono(monoId, (mono) => ({ ...mono, mascot }));
-}
-
-export function addMonoProject(monoId: string, path: string): void {
-  updateMono(monoId, (mono) => ({
-    ...mono,
-    projects: [...mono.projects, path],
-  }));
-}
-
-export function removeMonoProject(monoId: string, path: string): void {
-  const key = projectKey(path);
-  updateMono(monoId, (mono) => ({
-    ...mono,
-    projects: mono.projects.filter((project) => projectKey(project) !== key),
-  }));
-}
-
-/** Whether the Mono has been given this project. */
-export function monoWorksOn(mono: Pick<Mono, "projects">, path: string) {
-  const key = projectKey(path);
-  return mono.projects.some((project) => projectKey(project) === key);
 }
 
 export function subscribeMonos(onChange: () => void): () => void {

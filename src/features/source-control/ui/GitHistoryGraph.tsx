@@ -6,7 +6,11 @@ import {
   useState,
   type PointerEvent as ReactPointerEvent,
 } from "react";
-import { ChevronDown, ChevronRight, GitBranch } from "../../../shared/ui/icons";
+import {
+  ChevronDown,
+  ChevronRight,
+  GitBranch,
+} from "../../../shared/ui/icons";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { suppressTextSelection } from "../../../shared/lib/drag";
 import {
@@ -42,7 +46,7 @@ export function GitHistoryGraph({
   onOpenCommit,
 }: Props) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
-  const { commits } = useGitHistory(cwd, enabled && expanded);
+  const { commits, loading, error } = useGitHistory(cwd, enabled && expanded);
   const rows = useMemo(() => layoutGitGraph(commits), [commits]);
 
   return (
@@ -77,9 +81,15 @@ export function GitHistoryGraph({
           className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-none"
         >
           {!cwd || cwd === "~" ? (
-            <p className="px-3 py-2 text-[12px] text-content/45">No project folder</p>
+            <p className="px-3 py-2 text-[12px] text-content/45">
+              No project folder
+            </p>
+          ) : error && commits.length === 0 ? (
+            <p className="px-3 py-2 text-[12px] text-content/45">{error}</p>
           ) : commits.length === 0 ? (
-            <p className="px-3 py-2 text-[12px] text-content/45">No commits yet</p>
+            <p className="px-3 py-2 text-[12px] text-content/45">
+              {loading ? "Loading history…" : "No commits yet"}
+            </p>
           ) : (
             <ul className="min-w-0 max-w-full">
               {commits.map((commit, index) => {
@@ -114,17 +124,21 @@ function HistoryRow({
   active: boolean;
   onOpen: (pin?: boolean) => void;
 }) {
-  const graph = historyItemGraph(row);
+  const height = GRAPH_ROW_PX;
+  const graph = historyItemGraph(row, height);
   const badge = row.refs.find((ref) => ref.color) ?? row.refs[0];
+  const date = new Date(commit.timestamp * 1000);
+  const validDate = Number.isFinite(date.getTime());
   return (
-    <li className="min-w-0 overflow-visible" style={{ height: GRAPH_ROW_PX }}>
+    <li className="min-w-0 overflow-visible" style={{ height }}>
       <button
         type="button"
-        title={`${commit.shortSha} ${commit.subject}${commit.author ? ` — ${commit.author}` : ""}`}
+        title={`${commit.shortSha} ${commit.subject}${commit.author ? ` — ${commit.author}` : ""}${validDate ? `\n${date.toLocaleString()}` : ""}${commit.refs.length ? `\n${commit.refs.map((ref) => ref.name).join(", ")}` : ""}`}
         onClick={() => onOpen()}
         onDoubleClick={() => onOpen(true)}
         aria-pressed={active}
-        className={`git-history-item flex h-[22px] min-w-0 w-full items-stretch overflow-visible pr-2 text-left ${
+        style={{ height }}
+        className={`git-history-item flex min-w-0 w-full items-stretch overflow-visible rounded-none text-left pr-2 ${
           row.kind === "HEAD" ? "is-head" : ""
         } ${
           active
@@ -155,7 +169,7 @@ function HistoryRow({
               cx={circle.cx}
               cy={circle.cy}
               r={circle.r}
-              fill={circle.fill ?? "none"}
+              fill={circle.fill ? circle.fill : "none"}
               strokeWidth={circle.strokeWidth}
             />
           ))}
@@ -204,34 +218,40 @@ function RefPill({ refInfo }: { refInfo: GraphRef }) {
   );
 }
 
-function useGitHistory(
-  cwd: string,
-  enabled: boolean,
-): { commits: GitHistoryCommit[] } {
+function useGitHistory(cwd: string, enabled: boolean) {
   const [commits, setCommits] = useState<GitHistoryCommit[]>(
     () => historyByCwd.get(cwd) ?? [],
   );
   const commitsRef = useRef(commits);
   commitsRef.current = commits;
+  const request = useRef(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     if (!enabled || !cwd || cwd === "~") return;
-    void gitHistory(cwd)
-      .then((next) => {
-        const prev = commitsRef.current;
-        if (sameHistory(prev, next.commits)) return;
+    const id = ++request.current;
+    setLoading(true);
+    setError(null);
+    try {
+      const next = await gitHistory(cwd);
+      if (id !== request.current) return;
+      if (!sameHistory(commitsRef.current, next.commits)) {
         historyByCwd.set(cwd, next.commits);
         commitsRef.current = next.commits;
         setCommits(next.commits);
-      })
-      .catch(() => {
-        historyByCwd.delete(cwd);
-        commitsRef.current = [];
-        setCommits([]);
-      });
+      }
+    } catch (reason) {
+      if (id === request.current)
+        setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      if (id === request.current) setLoading(false);
+    }
   }, [cwd, enabled]);
 
   useEffect(() => {
+    setError(null);
+    setLoading(false);
     if (!enabled || !cwd || cwd === "~") {
       commitsRef.current = [];
       setCommits([]);
@@ -240,21 +260,25 @@ function useGitHistory(
     const cached = historyByCwd.get(cwd) ?? [];
     commitsRef.current = cached;
     setCommits(cached);
-    load();
+    void load();
     const onResume = () => {
-      if (!document.hidden) load();
+      if (!document.hidden) void load();
+    };
+    const onGitChanged = () => {
+      void load();
     };
     window.addEventListener("focus", onResume);
     document.addEventListener("visibilitychange", onResume);
-    const unsub = subscribeGitChanged(load);
+    const unsub = subscribeGitChanged(onGitChanged, { refsOnly: true });
     return () => {
+      request.current++;
       window.removeEventListener("focus", onResume);
       document.removeEventListener("visibilitychange", onResume);
       unsub();
     };
   }, [cwd, enabled, load]);
 
-  return { commits };
+  return { commits, loading, error };
 }
 
 function sameHistory(
@@ -268,6 +292,8 @@ function sameHistory(
       other &&
       commit.sha === other.sha &&
       commit.subject === other.subject &&
+      commit.author === other.author &&
+      commit.timestamp === other.timestamp &&
       commit.head === other.head &&
       commit.refs.length === other.refs.length &&
       commit.refs.every(

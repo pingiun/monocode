@@ -1,5 +1,10 @@
 import { NO_BRANCH_LABEL } from "../../features/source-control/model/worktrees";
 import {
+  allProjectThreadIds,
+  projectThreadsSnapshot,
+  subscribeProjectThreads,
+} from "../../features/coordinator/model/coordinator";
+import {
   type WorktreeFocus,
   inWorktreeFocus,
   useWorktreeFocus,
@@ -58,7 +63,8 @@ import {
   type GitFileDiffKind,
   type GitHistoryCommit,
 } from "../../platform/tauri/fs";
-import { IS_MAC, MOD } from "../../platform/tauri/platform";
+import { MOD } from "../../platform/tauri/platform";
+import { useTrafficLightsVisible } from "../../platform/tauri/useTrafficLightsVisible";
 import { copyText } from "../../platform/tauri/clipboard";
 import { resolveModel } from "../../features/sessions/model/models";
 import type { OpenFileFn } from "../../features/search/model/search";
@@ -128,7 +134,7 @@ import type {
 } from "../../features/sessions/model/session";
 import type { LiveAgent } from "../../features/sessions/model/liveAgents";
 import type { SessionSummary } from "../../features/sessions/data/sessionStore";
-import type { SettingsSectionId } from "../../features/settings/model/settings";
+import { type SettingsSectionId } from "../../features/settings/model/settings";
 import type { InstalledUpdate } from "../model/updateNotice";
 import { TAB_GROUP_COLORS } from "../../features/workspace/model/tabGroups";
 import { useDragResize } from "../../shared/hooks/useDragResize";
@@ -179,23 +185,15 @@ import { SidebarUpdateFooter } from "./SidebarUpdate";
 import { SourceControl } from "../../features/source-control/ui/SourceControl";
 import { GithubStarPrompt } from "./GithubStarPrompt";
 import {
-  isMonoSession,
+  listAgentMonos,
   listMonos,
-  MONO_STATUS_LABEL,
-  monoLook,
   monosSnapshot,
   subscribeMonos,
-  type MonoStatus,
 } from "../../features/monos/model/mono";
-import { MonoRailMascot } from "../../features/monos/ui/MonoRailMascot";
-import { useRailMonosPinned } from "../../features/settings/model/displayPrefs";
-import type { PickerMonos } from "../../features/projects/ui/SearchableProjectPicker";
-import { isHabitRun } from "../../features/monos/model/monoHabits";
 import {
-  unreadBadge,
-  unreadLabel,
-  type MonoRailProps,
-} from "./MonoRailSection";
+  CompactCoordinatorItems,
+  type CoordinatorRailProps,
+} from "./CoordinatorRailSection";
 import {
   refreshRemoteProjectSessions,
   remoteRequest,
@@ -349,10 +347,21 @@ type Props = {
   updateNotice?: InstalledUpdate | null;
   onOpenWhatsNew?: (version: string) => void;
   onDismissUpdate?: () => void;
-  /** The Monos on the rail; absent while Monos are off. */
-  monos?: MonoRailProps;
-  /** A Mono fills the main area, which has no project sidebar. */
+  /** A Claude Project fills the main area. */
   monoViewActive?: boolean;
+  /**
+   * A Claude Project's own sidebar, shown in the session sidebar's place
+   * while the project is open. Gets the window chrome to put above it when
+   * the rail is hidden.
+   */
+  projectPanel?: (topBar: ReactNode) => ReactNode;
+  /**
+   * Leaves the view covering the workspace (an app view or a project) for
+   * the rail's workspace tabs. Back may stop on the way (a project's chat).
+   */
+  onLeaveView?: () => void;
+  /** The Claude Projects on the rail; absent while they are off. */
+  coordinators?: CoordinatorRailProps;
 };
 
 function SidebarComponent({
@@ -444,9 +453,12 @@ function SidebarComponent({
   updateNotice = null,
   onOpenWhatsNew,
   onDismissUpdate,
-  monos,
   monoViewActive = false,
+  projectPanel,
+  onLeaveView,
+  coordinators,
 }: Props) {
+  const trafficLightsVisible = useTrafficLightsVisible();
   const remoteProject = isRemoteProjectPath(cwd);
   const tab: SidebarTabId = requestedTab;
   const remote = useRemoteProjectSessions(cwd, remoteProject);
@@ -693,19 +705,58 @@ function SidebarComponent({
     : pending && sessions.length === 0;
   const worktreeFocus = useWorktreeFocus(cwd);
   const focusedWorktree = remoteProject ? undefined : worktreeFocus;
-  useSyncExternalStore(subscribeMonos, monosSnapshot);
-  const listedSessions = mergeFolderSessionSummaries(
+  const rosterSnap = useSyncExternalStore(subscribeMonos, monosSnapshot);
+  // One lookup per roster change, not one storage read per listed session.
+  const monoSessionIds = useMemo(
+    () =>
+      new Set(
+        listMonos().flatMap((mono) => (mono.sessionId ? [mono.sessionId] : [])),
+      ),
+    [rosterSnap],
+  );
+  // Standalone Monos are gone; the sessions they started were saved hidden
+  // and had no other place to be found, so they list like any other.
+  const formerMonoSessionIds = useMemo(
+    () =>
+      new Set(
+        listAgentMonos().flatMap((mono) =>
+          mono.sessionId ? [mono.sessionId] : [],
+        ),
+      ),
+    [rosterSnap],
+  );
+  // A project's threads live in its threads list, not the workspace's.
+  const threadsSnap = useSyncExternalStore(
+    subscribeProjectThreads,
+    projectThreadsSnapshot,
+  );
+  const projectThreadIds = useMemo(() => allProjectThreadIds(), [threadsSnap]);
+  const listableSessions = mergeFolderSessionSummaries(
     projectSessions,
     remoteProject ? [] : openSessions,
     sessionFolders,
   ).filter(
     (session) =>
-      !isMonoSession(session.id) &&
-      !session.sidebarHidden &&
+      !monoSessionIds.has(session.id) &&
+      !projectThreadIds.has(session.id) &&
       !("ephemeral" in session && session.ephemeral) &&
-      !isHabitRun(session.id) &&
       !session.orchestrationLeadId &&
       inWorktreeFocus(session, focusedWorktree),
+  );
+  // Sessions saved hidden still show when a listed session started them:
+  // /operator launches were once hidden like a Mono's by mistake. So do the
+  // ones a former standalone Mono started. A project's threads are listed
+  // by the project instead.
+  const shownSessionIds = new Set(
+    listableSessions
+      .filter((session) => !session.sidebarHidden)
+      .map((session) => session.id),
+  );
+  const listedSessions = listableSessions.filter(
+    (session) =>
+      !session.sidebarHidden ||
+      !!startedSessionCaller(session.id, shownSessionIds) ||
+      !!startedSessionCaller(session.id, formerMonoSessionIds),
   );
   const visibleSessions = [
     ...filterSessionsByQuery(
@@ -798,14 +849,16 @@ function SidebarComponent({
   const sessionHarnesses = harnessesInSessions(projectSessions);
   const narrowedByUser = searchNarrowed || filtersActive;
   const visibleTabs = tabOrder.filter((itemId) => itemId !== "inbox");
-  const sortable = useAnimatedReorder(visibleTabs, (ids) => {
+  const onReorderTabs = (ids: SidebarTab[]) => {
+    const reordered = new Set(ids);
     let index = 0;
     const next = tabOrder.map((itemId) =>
-      itemId === "inbox" ? itemId : ids[index++],
+      reordered.has(itemId) ? ids[index++] : itemId,
     );
     setTabOrder(next);
     saveSidebarTabOrder(next);
-  });
+  };
+  const sortable = useAnimatedReorder(visibleTabs, onReorderTabs);
   const visibleFolderIds = sessionListEntries.flatMap((entry) =>
     entry.kind === "folder" ? [entry.folder.id] : [],
   );
@@ -839,10 +892,17 @@ function SidebarComponent({
     notesActive ||
     automationsActive ||
     settingsOpen;
-  // A remembered Mono sits underneath these views; select it only while visible.
-  const railMonos = monos
-    ? { ...monos, activeId: otherViewActive ? undefined : monos.activeId }
+  // A remembered project sits underneath these views; select it only while
+  // visible.
+  const railCoordinators = coordinators
+    ? {
+        ...coordinators,
+        activeId: otherViewActive ? undefined : coordinators.activeId,
+      }
     : undefined;
+  // Likewise the session they cover stays current but isn't shown selected.
+  const highlightedSessionId =
+    otherViewActive || monoViewActive ? undefined : activeListedSessionId;
   // A blank session has no project to browse, so the shell stands alone until
   // one is picked — whether or not the rail is open.
   const sidebarAvailable = !otherViewActive && !monoViewActive && inProject;
@@ -863,12 +923,17 @@ function SidebarComponent({
   const panelOpen = open || drawerVisible;
   // Keep the hidden explorer intact when a chat tab changes worktrees. Its
   // rows and file icons only need rebuilding when Files is actually shown.
+  const paneTab: SidebarTab = tab;
+  const panesOpen = panelOpen;
   const explorer = useRef<{ cwd: string; rootLabel?: string } | null>(null);
-  if (panelOpen && tab === "files") {
+  if (panesOpen && paneTab === "files") {
     explorer.current = { cwd: gitRoot, rootLabel: explorerRootLabel };
   }
-  const gitStatuses = useGitFileStatuses(gitRoot, panelOpen && tab === "files");
-  const changeStats = useProjectDiffStats(gitRoot, panelOpen);
+  const gitStatuses = useGitFileStatuses(
+    gitRoot,
+    panesOpen && paneTab === "files",
+  );
+  const changeStats = useProjectDiffStats(gitRoot, panesOpen);
 
   useEffect(() => {
     if (!drawerMode || !sidebarAvailable) setDrawerOpen(false);
@@ -1570,11 +1635,11 @@ function SidebarComponent({
     for (const session of listedSessions) motion.seen.add(session.id);
   });
 
-  const renderSessionCard = (session: SessionSummary, compact = false) =>
+  const renderSessionRow = (session: SessionSummary, compact = false) =>
     renamingSessionId === session.id && onRenameSession ? (
       <SessionRenameRow
         session={session}
-        isActive={session.id === activeListedSessionId}
+        isActive={session.id === highlightedSessionId}
         needsApproval={listedApprovalSessionIds.has(session.id)}
         onCommit={(title) => {
           onRenameSession(session.id, title);
@@ -1585,7 +1650,7 @@ function SidebarComponent({
     ) : (
       <SessionCard
         session={session}
-        isActive={session.id === activeListedSessionId}
+        isActive={session.id === highlightedSessionId}
         isSelected={selectedSessionIds.has(session.id)}
         busy={listedBusySessionIds.has(session.id)}
         done={unseenFinishedIds.has(session.id)}
@@ -1727,7 +1792,7 @@ function SidebarComponent({
 
   const workspaceHeader = (
     <div
-      className="flex h-10 shrink-0 select-none items-center gap-1 border-b border-stroke pl-3 pr-1.5"
+      className="flex shrink-0 select-none items-center gap-1 pl-3 h-10 border-b border-stroke pr-1.5"
       data-tauri-drag-region="deep"
     >
       <div className="flex min-w-0 flex-1 items-center">
@@ -1749,10 +1814,114 @@ function SidebarComponent({
     </div>
   );
 
+  const filesPane = (
+    <div
+      className={`flex min-h-0 flex-1 flex-col overflow-hidden ${
+        paneTab === "files" ? "" : "hidden"
+      }`}
+    >
+      {filesSearchOpen ? (
+        <ProjectSearch
+          cwd={gitRoot}
+          focusToken={searchFocusToken}
+          onOpenFile={onOpenFile}
+          onClose={() => onFilesSearchOpenChange(false)}
+        />
+      ) : cwd && cwd !== "~" ? (
+        <div className="flex min-h-0 flex-1 flex-col">
+          {explorer.current ? (
+            <FileTree
+              key={explorer.current.cwd}
+              cwd={explorer.current.cwd}
+              rootLabel={explorer.current.rootLabel}
+              onOpenFile={onOpenFile}
+              onOpenTerminal={remoteProject ? undefined : onOpenTerminal}
+              onFileMoved={onFileMoved}
+              onFileDeleted={onFileDeleted}
+              onSearch={onOpenFilesSearch}
+              gitStatuses={gitStatuses}
+            />
+          ) : null}
+        </div>
+      ) : (
+        <p className="px-3 py-2 text-[12px] text-content/50">
+          No project folder
+        </p>
+      )}
+    </div>
+  );
+  const changesPane = (
+    <>
+      {paneTab === "changes" ? (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <SourceControl
+            cwd={gitRoot}
+            enabled={panesOpen}
+            textHarness={textHarness}
+            selectedPath={selectedDiffPath}
+            selectedKind={selectedDiffKind}
+            selectedSha={selectedCommitSha}
+            onOpenFile={
+              onOpenDiff ??
+              ((path) => onOpenFile(path, undefined, { exact: true }))
+            }
+            onOpenAllChanges={onOpenAllChanges ?? (() => {})}
+            onOpenCommit={onOpenCommit ?? (() => {})}
+          />
+        </div>
+      ) : null}
+    </>
+  );
+
+  // Window chrome atop the column when no rail carries it.
+  const columnTopBar = titleBarAbove ? null : (
+    <div
+      className="flex h-10 shrink-0 select-none items-center border-b border-stroke pr-1.5"
+      data-tauri-drag-region="deep"
+    >
+      {trafficLightsVisible ? <div className="w-[78px] shrink-0" /> : null}
+      <DevModeSlot />
+      <TabVisitNav
+        canGoBack={canGoBack}
+        canGoForward={canGoForward}
+        onGoBack={onGoBack}
+        onGoForward={onGoForward}
+        onTogglePanel={compactProjectRail ? undefined : onToggleProjectRail}
+      />
+    </div>
+  );
+  const resizeHandle = (
+    <div
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      aria-valuenow={resize.width}
+      aria-valuemin={MIN_WIDTH}
+      aria-valuemax={MAX_WIDTH}
+      className={`absolute inset-y-0 -right-px z-10 w-1.5 cursor-col-resize touch-none${
+        resize.dragging ? " bg-content/15" : " hover:bg-content/10"
+      }`}
+      onPointerDown={resize.onPointerDown}
+      onDoubleClick={resize.onDoubleClick}
+    />
+  );
+  // A project open in the main area shows its own sidebar in this column.
+  const projectPanelVisible =
+    open && monoViewActive && !otherViewActive && !!projectPanel;
+  const projectPanelContent = projectPanelVisible ? (
+    <aside
+      ref={resize.setPaneRef}
+      className="relative flex h-full min-h-0 shrink-0 flex-col body-glass border-r border-stroke"
+    >
+      {projectPanel(railVisible ? null : columnTopBar)}
+      {resizeHandle}
+    </aside>
+  ) : null;
+
   const sidebarContent = (
     <aside
       ref={resize.setPaneRef}
-      className="body-glass relative flex h-full min-h-0 shrink-0 flex-col border-r border-stroke"
+      className="relative flex h-full min-h-0 shrink-0 flex-col body-glass border-r border-stroke"
     >
       {railVisible ? (
         <>
@@ -1767,24 +1936,7 @@ function SidebarComponent({
         </>
       ) : (
         <>
-          {titleBarAbove ? null : (
-            <div
-              className="flex h-10 shrink-0 select-none items-center border-b border-stroke pr-1.5"
-              data-tauri-drag-region="deep"
-            >
-              {IS_MAC ? <div className="w-[78px] shrink-0" /> : null}
-              <DevModeSlot />
-              <TabVisitNav
-                canGoBack={canGoBack}
-                canGoForward={canGoForward}
-                onGoBack={onGoBack}
-                onGoForward={onGoForward}
-                onTogglePanel={
-                  compactProjectRail ? undefined : onToggleProjectRail
-                }
-              />
-            </div>
-          )}
+          {columnTopBar}
           {compactRailVisible ? workspaceHeader : null}
           {onSelectProject && !compactRailVisible ? (
             <SidebarProjectPicker
@@ -1819,40 +1971,7 @@ function SidebarComponent({
         </>
       )}
       <>
-        <div
-          className={`flex min-h-0 flex-1 flex-col overflow-hidden ${
-            tab === "files" ? "" : "hidden"
-          }`}
-        >
-          {filesSearchOpen ? (
-            <ProjectSearch
-              cwd={gitRoot}
-              focusToken={searchFocusToken}
-              onOpenFile={onOpenFile}
-              onClose={() => onFilesSearchOpenChange(false)}
-            />
-          ) : cwd && cwd !== "~" ? (
-            <div className="flex min-h-0 flex-1 flex-col">
-              {explorer.current ? (
-                <FileTree
-                  key={explorer.current.cwd}
-                  cwd={explorer.current.cwd}
-                  rootLabel={explorer.current.rootLabel}
-                  onOpenFile={onOpenFile}
-                  onOpenTerminal={remoteProject ? undefined : onOpenTerminal}
-                  onFileMoved={onFileMoved}
-                  onFileDeleted={onFileDeleted}
-                  onSearch={onOpenFilesSearch}
-                  gitStatuses={gitStatuses}
-                />
-              ) : null}
-            </div>
-          ) : (
-            <p className="px-3 py-2 text-[12px] text-content/50">
-              No project folder
-            </p>
-          )}
-        </div>
+        {filesPane}
         {tab === "sessions" && cwd && cwd !== "~" ? (
           <div className="flex h-9 shrink-0 items-center gap-1 border-b border-stroke px-2">
             <div className="relative flex h-7 min-w-0 flex-1 items-center">
@@ -1898,26 +2017,28 @@ function SidebarComponent({
                   Couldn’t load sessions
                 </p>
               ) : visibleSessions.length === 0 ? (
-                // A narrowed-down result is a transient answer to what the user
-                // just typed, so it stays a quiet line of text. Only the genuine
-                // "this project has nothing in it" case earns the illustration.
-                narrowedByUser ? (
-                  <p className="px-3 py-2 text-[12px] text-content/50">
-                    {searchNarrowed
-                      ? "No matching sessions"
-                      : "No sessions match these filters"}
-                  </p>
-                ) : remoteProject && !remote.machine ? (
-                  <p className="px-3 py-2 text-[12px] text-content/45">
-                    This project’s machine isn’t connected on this computer.
-                  </p>
-                ) : (
-                  <SessionsEmpty message="Sessions you start will show up here" />
-                )
+                <div>
+                  {/* A narrowed-down result is a transient answer to what the user
+                    just typed, so it stays a quiet line of text. Only the genuine
+                    "this project has nothing in it" case earns the illustration. */}
+                  {narrowedByUser ? (
+                    <p className="px-3 py-2 text-[12px] text-content/50">
+                      {searchNarrowed
+                        ? "No matching sessions"
+                        : "No sessions match these filters"}
+                    </p>
+                  ) : remoteProject && !remote.machine ? (
+                    <p className="px-3 py-2 text-[12px] text-content/45">
+                      This project’s machine isn’t connected on this computer.
+                    </p>
+                  ) : (
+                    <SessionsEmpty message="Sessions you start will show up here" />
+                  )}
+                </div>
               ) : (
                 <ul
                   data-session-list
-                  className="flex flex-col gap-0.5 p-1.5 pb-10"
+                  className="flex flex-col pb-10 gap-0.5 p-1.5"
                 >
                   {sessionListEntries.map((entry, index) => {
                     if (entry.kind === "pinned" || entry.kind === "reminders") {
@@ -1990,7 +2111,7 @@ function SidebarComponent({
                                     cwd={cwd}
                                     motion={sessionInsertMotion}
                                   >
-                                    {renderSessionCard(session, true)}
+                                    {renderSessionRow(session, true)}
                                   </SessionListItem>
                                 ))}
                               </ul>
@@ -2121,7 +2242,7 @@ function SidebarComponent({
                                       cwd={cwd}
                                       motion={sessionInsertMotion}
                                     >
-                                      {renderSessionCard(session, true)}
+                                      {renderSessionRow(session, true)}
                                     </SessionListItem>
                                   ))}
                                 </ul>
@@ -2161,7 +2282,7 @@ function SidebarComponent({
                         cwd={cwd}
                         motion={sessionInsertMotion}
                       >
-                        {renderSessionCard(entry.session)}
+                        {renderSessionRow(entry.session)}
                       </SessionListItem>
                     );
                   })}
@@ -2177,24 +2298,7 @@ function SidebarComponent({
             </div>
           )}
         </div>
-        {tab === "changes" ? (
-          <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-            <SourceControl
-              cwd={gitRoot}
-              enabled={panelOpen}
-              textHarness={textHarness}
-              selectedPath={selectedDiffPath}
-              selectedKind={selectedDiffKind}
-              selectedSha={selectedCommitSha}
-              onOpenFile={
-                onOpenDiff ??
-                ((path) => onOpenFile(path, undefined, { exact: true }))
-              }
-              onOpenAllChanges={onOpenAllChanges ?? (() => {})}
-              onOpenCommit={onOpenCommit ?? (() => {})}
-            />
-          </div>
-        ) : null}
+        {changesPane}
         {showSidebarFooter ? (
           <>
             <LiveAgentsPreview
@@ -2280,28 +2384,12 @@ function SidebarComponent({
           onClose={() => setLinkingSession(null)}
         />
       ) : null}
-      <div
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize sidebar"
-        aria-valuenow={resize.width}
-        aria-valuemin={MIN_WIDTH}
-        aria-valuemax={MAX_WIDTH}
-        className={`absolute inset-y-0 -right-px z-10 w-1.5 cursor-col-resize touch-none ${
-          resize.dragging ? "bg-content/15" : "hover:bg-content/10"
-        }`}
-        onPointerDown={resize.onPointerDown}
-        onDoubleClick={resize.onDoubleClick}
-      />
+      {resizeHandle}
     </aside>
   );
 
-  return (
-    <div
-      className={`flex h-full shrink-0 ${
-        railVisible || compactRailVisible || sidebarVisible ? "" : "hidden"
-      }`}
-    >
+  const rails = (
+    <>
       {compactRailVisible ? (
         <CompactProjectRail
           cwd={cwd}
@@ -2331,10 +2419,10 @@ function SidebarComponent({
           automationsActive={automationsActive}
           onOpenSettings={onOpenSettings}
           onTogglePanel={onToggleProjectRail}
-          onLeaveActive={onGoBack}
+          onLeaveActive={onLeaveView ?? onGoBack}
           titleBarAbove={titleBarAbove}
-          monos={railMonos}
           monoViewActive={monoViewActive}
+          coordinators={railCoordinators}
         />
       ) : null}
       {railMounted.current && onSelectProject && onOpenProject ? (
@@ -2373,10 +2461,27 @@ function SidebarComponent({
           updateNotice={updateNotice}
           onOpenWhatsNew={onOpenWhatsNew}
           onDismissUpdate={onDismissUpdate}
-          monos={railMonos}
+          coordinators={railCoordinators}
         />
       ) : null}
+    </>
+  );
+
+  return (
+    <div
+      className={`flex h-full shrink-0 ${
+        railVisible ||
+        compactRailVisible ||
+        sidebarVisible ||
+        projectPanelVisible ||
+        drawerRendered
+          ? ""
+          : "hidden"
+      }`}
+    >
+      {rails}
       {sidebarVisible ? sidebarContent : null}
+      {projectPanelContent}
       {drawerRendered ? (
         // Pinned to the right edge, so the sidebar slides in as the width grows.
         <div
@@ -2579,8 +2684,9 @@ function CompactProjectRail({
   onTogglePanel,
   onLeaveActive,
   titleBarAbove,
-  monos,
   monoViewActive = false,
+  coordinators,
+  onReselectCoordinator,
 }: {
   cwd: string;
   recents: RecentProject[];
@@ -2612,32 +2718,13 @@ function CompactProjectRail({
   onTogglePanel?: () => void;
   onLeaveActive?: () => void;
   titleBarAbove: boolean;
-  /** Monos have no row here, so the project button lists them too. */
-  monos?: MonoRailProps;
   /** A Mono fills the main area: no workspace tab is the current one. */
   monoViewActive?: boolean;
+  /** Claude Projects, as mascot buttons below the shortcuts. */
+  coordinators?: CoordinatorRailProps;
+  /** Choosing the open project again. */
+  onReselectCoordinator?: () => void;
 }) {
-  const monosSnap = useSyncExternalStore(subscribeMonos, monosSnapshot);
-  const monosPinned = useRailMonosPinned();
-  const monoItems = useMemo(() => {
-    if (!monos) return [];
-    return listMonos().map((mono) => ({
-      id: mono.id,
-      ...monoLook(mono),
-      status: monos.states.get(mono.id)?.status ?? "idle",
-    }));
-    // The roster is read through its snapshot.
-  }, [monos, monosSnap]);
-  const pickerMonos = useMemo((): PickerMonos | undefined => {
-    if (!monos) return undefined;
-    return {
-      // Pinned Monos have their own buttons; the picker keeps "New mono".
-      items: monosPinned ? [] : monoItems,
-      activeId: monos.activeId,
-      onOpen: monos.onOpen,
-      onCreate: monos.onCreate,
-    };
-  }, [monos, monoItems, monosPinned]);
   const [inboxMenu, setInboxMenu] = useState<{ x: number; y: number } | null>(
     null,
   );
@@ -2686,38 +2773,6 @@ function CompactProjectRail({
           icon={PanelLeft}
           onClick={onTogglePanel}
         />
-        {monos && monosPinned && monoItems.length ? (
-          <>
-            <div
-              role="group"
-              aria-label="Monos"
-              data-compact-rail-monos
-              className="flex flex-col items-center gap-1.5"
-            >
-              {monoItems.map((mono) => (
-                <CompactRailMono
-                  key={mono.id}
-                  name={mono.name}
-                  mascot={mono.mascot}
-                  color={mono.color}
-                  status={mono.status}
-                  active={mono.id === monos.activeId}
-                  unseen={
-                    mono.id === monos.activeId
-                      ? 0
-                      : (monos.unseenCounts?.get(mono.id) ?? 0)
-                  }
-                  onClick={() => monos.onOpen(mono.id)}
-                />
-              ))}
-            </div>
-            <span
-              aria-hidden
-              data-compact-rail-monos-divider
-              className="h-px w-6 shrink-0 bg-stroke"
-            />
-          </>
-        ) : null}
         {onSelectProject ? (
           <SearchableProjectPickerWithMenu
             cwd={cwd}
@@ -2729,7 +2784,6 @@ function CompactProjectRail({
             onOpenProject={onOpenProject}
             onRemoveProject={onRemoveProject}
             onOpenNotificationSettings={onOpenNotificationSettings}
-            monos={pickerMonos}
           />
         ) : null}
         <div
@@ -2801,7 +2855,20 @@ function CompactProjectRail({
           onClick={action(automationsActive, onOpenAutomations)}
         />
       </div>
-      <div className="min-h-2 flex-1" />
+      {coordinators ? (
+        <div className="flex min-h-2 w-full flex-1 flex-col items-center overflow-y-auto overscroll-none">
+          <div
+            aria-hidden
+            className="mx-auto my-1.5 h-px w-6 shrink-0 bg-stroke"
+          />
+          <CompactCoordinatorItems
+            {...coordinators}
+            onReselect={onReselectCoordinator}
+          />
+        </div>
+      ) : (
+        <div className="min-h-2 flex-1" />
+      )}
       <div className="flex w-full flex-col items-center gap-1 py-1.5">
         <CompactRailAction
           label="Settings"
@@ -2824,58 +2891,6 @@ function CompactProjectRail({
       ) : null}
       {railTooltip.tooltip}
     </nav>
-  );
-}
-
-function CompactRailMono({
-  name,
-  mascot,
-  color,
-  status,
-  active,
-  unseen,
-  onClick,
-}: {
-  name: string;
-  mascot: string;
-  color: string;
-  status: MonoStatus;
-  active: boolean;
-  /** Replies the user has not read. */
-  unseen: number;
-  onClick: () => void;
-}) {
-  const label = `${name}, ${MONO_STATUS_LABEL[status]}`;
-  return (
-    <button
-      type="button"
-      data-rail-tip={name}
-      data-rail-tip-detail={
-        unseen
-          ? `${MONO_STATUS_LABEL[status]} · ${unreadLabel(unseen)}`
-          : MONO_STATUS_LABEL[status]
-      }
-      aria-label={unseen ? `${label}, ${unreadLabel(unseen)}` : label}
-      aria-current={active ? "true" : undefined}
-      data-compact-rail-mono
-      onClick={onClick}
-      className={`relative grid size-8 shrink-0 place-items-center rounded-md active:scale-[0.97] ${
-        active
-          ? "bg-selection"
-          : "opacity-65 hover:bg-content/10 hover:opacity-100"
-      }`}
-    >
-      <MonoRailMascot name={mascot} color={color} status={status} />
-      {unseen ? (
-        <span
-          aria-hidden
-          data-mono-unread={unseen}
-          className="absolute -right-0.5 -top-0.5 grid h-3.5 min-w-3.5 place-items-center rounded-full bg-background-base px-0.5 text-[9px] font-medium tabular-nums leading-none text-content/80 ring-1 ring-content/15"
-        >
-          {unreadBadge(unseen)}
-        </span>
-      ) : null}
-    </button>
   );
 }
 
@@ -2967,6 +2982,22 @@ function CompactRailAction({
       ) : null}
     </button>
   );
+}
+
+/** The session among `ids` that started `id` through the app CLI, if any. */
+export function startedSessionCaller(
+  id: string,
+  ids: ReadonlySet<string>,
+): string | undefined {
+  if (!id.startsWith("app-")) return undefined;
+  const rest = id.slice("app-".length);
+  // The longest listed prefix, since IDs and request IDs both use hyphens.
+  for (let index = rest.lastIndexOf("-"); index > 0;) {
+    const candidate = rest.slice(0, index);
+    if (candidate !== id && ids.has(candidate)) return candidate;
+    index = rest.lastIndexOf("-", index - 1);
+  }
+  return undefined;
 }
 
 function WorkspaceTitleActions({
@@ -3124,9 +3155,7 @@ function FolderRow({
           onRename();
         }
       }}
-      className={`group relative flex w-full touch-none items-center gap-1.5 px-2 h-8 text-left ${
-        expanded ? "rounded-md" : ""
-      } ${
+      className={`group relative flex w-full touch-none items-center gap-1.5 px-2 h-8 text-left ${expanded ? "rounded-md" : ""} ${
         dropTarget
           ? "text-content"
           : expanded
@@ -3165,7 +3194,7 @@ function FolderRow({
               )}
             </span>
             <ChevronRight
-              className="hidden size-3.5 group-hover:block group-focus-visible:block text-content"
+              className="hidden size-3.5 text-content group-hover:block group-focus-visible:block"
               strokeWidth={1.75}
             />
           </>
@@ -3669,278 +3698,280 @@ export const SessionCard = memo(function SessionCard({
       : "py-2";
 
   return (
-    <div className="group relative">
-      <div
-        title={title}
-        data-session-card={session.id}
-        data-orchestration-card={orchestration ? "true" : undefined}
-        data-session-selected={isSelected ? "true" : undefined}
-        data-tauri-drag-region="false"
-        onPointerDown={onPointerDown}
-        onPointerEnter={schedulePrefetch}
-        onPointerLeave={cancelScheduledPrefetch}
-        onClick={(event) => {
-          if (performance.now() < skipClickUntil.current) return;
-          onSelect(session.id, event);
-        }}
-        onContextMenu={
-          onContextMenu
-            ? (event) => onContextMenu(session.id, event)
-            : undefined
-        }
-        className={`relative border flex w-full cursor-default select-none touch-none flex-col rounded-md px-2.5 text-left ${cardPaddingY} ${
-          dragging ? "opacity-40" : ""
-        } ${
-          dropTarget
-            ? "text-content border-transparent"
-            : isSelected
-              ? `bg-accent/15 text-content ${draft ? "border-content/30 border-dashed" : "border-transparent"}`
-              : needsApproval
-                ? "bg-content/20 text-content border-content/30 border-dashed"
-                : isActive
-                  ? `bg-selection text-content ${draft ? "border-content/30 border-dashed" : "border-transparent"}`
-                  : draft
-                    ? "border-content/25 border-dashed text-content/80 hover:bg-content/5 hover:text-content"
-                    : `text-content/80 hover:text-content border-transparent ${
-                        orchestrationExpanded
-                          ? "bg-content/5 hover:bg-content/10"
-                          : "hover:bg-content/5"
-                      }`
-        }`}
-      >
-        {dropTarget ? (
-          <div className="pointer-events-none absolute inset-0 rounded-md bg-accent/20" />
-        ) : null}
+    <>
+      <div className="group relative">
         <div
-          role="button"
-          tabIndex={0}
-          aria-current={isActive ? "true" : undefined}
-          aria-pressed={isSelected}
-          data-session-select={session.id}
-          onKeyDown={onKeyDown}
-          onMouseDown={(event) => {
-            if (event.button !== 0) return;
-            // Shift-click can trigger :focus-visible. Mouse selection should
-            // only highlight the card; Tab can still focus this button.
-            event.preventDefault();
-            // Clear prior focus too, so shortcuts cannot target another card.
-            const focused = event.currentTarget.ownerDocument.activeElement;
-            if (focused instanceof HTMLElement) focused.blur();
+          title={title}
+          data-session-card={session.id}
+          data-orchestration-card={orchestration ? "true" : undefined}
+          data-session-selected={isSelected ? "true" : undefined}
+          data-tauri-drag-region="false"
+          onPointerDown={onPointerDown}
+          onPointerEnter={schedulePrefetch}
+          onPointerLeave={cancelScheduledPrefetch}
+          onClick={(event) => {
+            if (performance.now() < skipClickUntil.current) return;
+            onSelect(session.id, event);
           }}
-          className="rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
+          onContextMenu={(event) => {
+            onContextMenu?.(session.id, event);
+          }}
+          className={`relative border flex w-full cursor-default select-none touch-none flex-col rounded-md px-2.5 text-left ${cardPaddingY} ${
+            dragging ? "opacity-40" : ""
+          } ${
+            dropTarget
+              ? "text-content border-transparent"
+              : isSelected
+                ? `bg-accent/15 text-content ${draft ? "border-content/30 border-dashed" : "border-transparent"}`
+                : needsApproval
+                  ? "bg-content/20 text-content border-content/30 border-dashed"
+                  : isActive
+                    ? `bg-selection text-content ${draft ? "border-content/30 border-dashed" : "border-transparent"}`
+                    : draft
+                      ? "border-content/25 border-dashed text-content/80 hover:bg-content/5 hover:text-content"
+                      : `text-content/80 hover:text-content border-transparent ${
+                          orchestrationExpanded
+                            ? "bg-content/5 hover:bg-content/10"
+                            : "hover:bg-content/5"
+                        }`
+          }`}
         >
-          {headerRow ? (
-            <span className="relative flex items-center gap-2">
-              <span className="flex min-w-0 flex-1 items-center gap-1.5">
-                <HarnessIcon
-                  harness={session.harness}
-                  className="size-3.5 shrink-0"
-                />
-                <span className="min-w-0 truncate text-[11px] text-content/50">
-                  {model}
-                </span>
-              </span>
-              <span className="flex shrink-0 items-center gap-1.5">
-                {linkedUpdateDot}
-                {status}
-              </span>
-            </span>
+          {dropTarget ? (
+            <div className="pointer-events-none absolute inset-0 rounded-md bg-accent/20" />
           ) : null}
-          <span
-            className={`relative flex min-w-0 items-center gap-1.5 ${
-              headerRow ? "mt-1" : ""
-            }`}
+          <div
+            role="button"
+            tabIndex={0}
+            aria-current={isActive ? "true" : undefined}
+            aria-pressed={isSelected}
+            data-session-select={session.id}
+            onKeyDown={onKeyDown}
+            onMouseDown={(event) => {
+              if (event.button !== 0) return;
+              // Shift-click can trigger :focus-visible. Mouse selection should
+              // only highlight the card; Tab can still focus this button.
+              event.preventDefault();
+              // Clear prior focus too, so shortcuts cannot target another card.
+              const focused = event.currentTarget.ownerDocument.activeElement;
+              if (focused instanceof HTMLElement) focused.blur();
+            }}
+            className="rounded-sm outline-none focus-visible:ring-1 focus-visible:ring-accent/50"
           >
-            {session.pinned ? (
-              <Pin
-                className="size-3 shrink-0 text-content/45"
-                strokeWidth={1.75}
-              />
-            ) : null}
-            <ParticleText
-              text={title}
-              className="line-clamp-1 text-[13px] font-semibold leading-snug text-content"
-            />
-            {headerRow ? null : (
-              <span className="ml-auto flex shrink-0 items-center gap-1.5 pl-2">
-                {linkedUpdateDot}
-                {status}
-              </span>
-            )}
-          </span>
-        </div>
-        {orchestrationExpanded ? (
-          <OrchestrationSidebarAgents
-            leadId={session.id}
-            summary={orchestration!}
-          />
-        ) : null}
-        <span className="relative mt-1 flex items-center gap-2">
-          {project && !gitLabel ? (
-            <span
-              className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45"
-              title={session.cwd}
-            >
-              <Folder className="size-3 shrink-0" strokeWidth={1.75} />
-              <span className="min-w-0 truncate">{project}</span>
-            </span>
-          ) : gitLabel ? (
-            <span
-              className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45"
-              title={
-                session.worktreeCwd
-                  ? `${gitLabel}\n${session.worktreeCwd}`
-                  : gitLabel
-              }
-            >
-              <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
-              <span className="min-w-0 truncate">
-                {project ? `${project} · ${gitLabel}` : gitLabel}
-              </span>
-            </span>
-          ) : (
-            <span className="min-w-0 flex-1" />
-          )}
-          <span className="relative flex shrink-0 items-center gap-px">
-            {/* Just the provider's mark; the model's name slides out beside
-                it while the card is hovered or focused. */}
-            {modelInFooter && model ? (
-              <span
-                title={model}
-                className="flex min-w-0 items-center text-[11px] text-content/50"
-              >
-                <span className="max-w-0 truncate pr-0 opacity-0 transition-[max-width,opacity,padding] duration-200 ease-out group-focus-within:max-w-32 group-focus-within:pr-1.5 group-focus-within:opacity-100 group-hover:max-w-32 group-hover:pr-1.5 group-hover:opacity-100 motion-reduce:transition-none">
-                  {model}
+            {headerRow ? (
+              <span className="relative flex items-center gap-2">
+                <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                  <HarnessIcon
+                    harness={session.harness}
+                    className="size-3.5 shrink-0"
+                  />
+                  <span className="min-w-0 truncate text-[11px] text-content/50">
+                    {model}
+                  </span>
                 </span>
-                <HarnessIcon
-                  harness={session.harness}
-                  className="size-3.5 shrink-0"
+                <span className="flex shrink-0 items-center gap-1.5">
+                  {linkedUpdateDot}
+                  {status}
+                </span>
+              </span>
+            ) : null}
+            <span
+              className={`relative flex min-w-0 items-center gap-1.5 ${
+                headerRow ? "mt-1" : ""
+              }`}
+            >
+              {session.pinned ? (
+                <Pin
+                  className="size-3 shrink-0 text-content/45"
+                  strokeWidth={1.75}
                 />
-              </span>
-            ) : null}
-            {onArchive ? (
-              <button
-                type="button"
-                data-no-drag
-                data-tauri-drag-region="false"
-                title={archiveLabel}
-                aria-label={`${archiveLabel} ${title}`}
-                onPointerDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onArchive(session.id, !session.archived);
-                }}
-                className="pointer-events-none grid size-5 place-items-center rounded-md text-content/50 opacity-0 hover:bg-content/10 hover:text-content group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
-              >
-                <Archive className="size-3 shrink-0" strokeWidth={1.75} />
-              </button>
-            ) : null}
-            {workItemBadge}
-            {session.automationId ? (
+              ) : null}
+              <ParticleText
+                text={title}
+                className="line-clamp-1 text-[13px] font-semibold leading-snug text-content"
+              />
+              {headerRow ? null : (
+                <span className="ml-auto flex shrink-0 items-center gap-1.5 pl-2">
+                  {linkedUpdateDot}
+                  {status}
+                </span>
+              )}
+            </span>
+          </div>
+          {orchestrationExpanded ? (
+            <OrchestrationSidebarAgents
+              leadId={session.id}
+              summary={orchestration!}
+            />
+          ) : null}
+          <span className="relative mt-1 flex items-center gap-2">
+            {project && !gitLabel ? (
               <span
-                data-automation-icon
-                role="img"
-                title="Started by an automation"
-                aria-label="Started by an automation"
-                className="grid size-5 -mr-1 shrink-0 place-items-center text-amber-400"
+                className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45"
+                title={session.cwd}
               >
-                <Zap className="size-3" strokeWidth={1.75} />
+                <Folder className="size-3 shrink-0" strokeWidth={1.75} />
+                <span className="min-w-0 truncate">{project}</span>
               </span>
-            ) : null}
-            {orchestration ? (
-              <div
-                ref={orchestrationTooltipRootRef}
-                className="relative shrink-0"
-                onMouseEnter={() => setOrchestrationTooltipOpen(true)}
-                onMouseLeave={() => setOrchestrationTooltipOpen(false)}
+            ) : gitLabel ? (
+              <span
+                className="flex min-w-0 flex-1 items-center gap-1 text-[11px] text-content/45"
+                title={
+                  session.worktreeCwd
+                    ? `${gitLabel}\n${session.worktreeCwd}`
+                    : gitLabel
+                }
               >
+                <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
+                <span className="min-w-0 truncate">
+                  {project ? `${project} · ${gitLabel}` : gitLabel}
+                </span>
+              </span>
+            ) : (
+              <span className="min-w-0 flex-1" />
+            )}
+            <span className="relative flex shrink-0 items-center gap-px">
+              {/* Just the provider's mark; the model's name slides out beside
+              it while the card is hovered or focused. */}
+              {modelInFooter && model ? (
+                <span
+                  title={model}
+                  className="flex min-w-0 items-center text-[11px] text-content/50"
+                >
+                  <span className="max-w-0 truncate pr-0 opacity-0 transition-[max-width,opacity,padding] duration-200 ease-out group-focus-within:max-w-32 group-focus-within:pr-1.5 group-focus-within:opacity-100 group-hover:max-w-32 group-hover:pr-1.5 group-hover:opacity-100 motion-reduce:transition-none">
+                    {model}
+                  </span>
+                  <HarnessIcon
+                    harness={session.harness}
+                    className="size-3.5 shrink-0"
+                  />
+                </span>
+              ) : null}
+              {onArchive ? (
                 <button
                   type="button"
                   data-no-drag
                   data-tauri-drag-region="false"
-                  data-orchestration-icon
-                  aria-label={`Orchestrator, ${orchestration.tasks.length} ${
-                    orchestration.tasks.length === 1 ? "subagent" : "subagents"
-                  }, ${orchestrationDone} done`}
-                  aria-describedby={
-                    orchestrationTooltipOpen
-                      ? orchestrationTooltipId
-                      : undefined
-                  }
+                  title={archiveLabel}
+                  aria-label={`${archiveLabel} ${title}`}
                   onPointerDown={(event) => event.stopPropagation()}
-                  onFocus={() => setOrchestrationTooltipOpen(true)}
-                  onBlur={() => setOrchestrationTooltipOpen(false)}
                   onClick={(event) => {
                     event.stopPropagation();
-                    setOrchestrationTooltipOpen(false);
-                    onSelect(session.id, event);
+                    onArchive(session.id, !session.archived);
                   }}
-                  className="grid size-5 shrink-0 place-items-center rounded-md text-fuchsia-300/65 hover:bg-content/10 hover:text-fuchsia-200/90"
+                  className="pointer-events-none grid size-5 place-items-center rounded-md text-content/50 opacity-0 hover:bg-content/10 hover:text-content group-focus-within:pointer-events-auto group-focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100"
                 >
-                  <Share className="size-3" />
+                  <Archive className="size-3 shrink-0" strokeWidth={1.75} />
                 </button>
-              </div>
-            ) : null}
-          </span>
-        </span>
-      </div>
-      {orchestration && orchestrationTooltipOpen ? (
-        <Popover
-          anchor={orchestrationTooltipRootRef}
-          side="right"
-          align="end"
-          width={248}
-          maxHeight={320}
-          role="tooltip"
-          id={orchestrationTooltipId}
-          className="pointer-events-none overflow-y-auto p-2.5"
-        >
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[11px] font-semibold text-content/85">
-              Subagents
-            </span>
-            <span className="shrink-0 text-[10px] tabular-nums text-content/45">
-              {orchestrationDone}/{orchestration.tasks.length} done
-            </span>
-          </div>
-          <div className="mt-1.5 flex flex-col gap-0.5">
-            {orchestration.tasks.map((task) => {
-              const label = orchestrationTaskLabel(task, orchestration);
-              return (
-                <div
-                  key={task.sessionId}
-                  className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-1"
+              ) : null}
+              {workItemBadge}
+              {session.automationId ? (
+                <span
+                  data-automation-icon
+                  role="img"
+                  title="Started by an automation"
+                  aria-label="Started by an automation"
+                  className="grid size-5 -mr-1 shrink-0 place-items-center text-amber-400"
                 >
-                  <HarnessIcon
-                    harness={task.harness}
-                    className="size-3.5 shrink-0 opacity-75"
-                  />
-                  <span className="min-w-0 flex-1 truncate text-[11px] text-content/75">
-                    {task.title}
-                  </span>
-                  <span
-                    className={`shrink-0 text-[10px] ${
-                      task.needsInput ||
-                      task.status === "failed" ||
-                      task.status === "blocked" ||
-                      task.status === "interrupted"
-                        ? "text-amber-400"
-                        : label === "Working"
-                          ? "text-accent"
-                          : task.status === "completed"
-                            ? "text-emerald-400"
-                            : "text-content/45"
-                    }`}
+                  <Zap className="size-3" strokeWidth={1.75} />
+                </span>
+              ) : null}
+              {orchestration ? (
+                <div
+                  ref={orchestrationTooltipRootRef}
+                  className="relative shrink-0"
+                  onMouseEnter={() => setOrchestrationTooltipOpen(true)}
+                  onMouseLeave={() => setOrchestrationTooltipOpen(false)}
+                >
+                  <button
+                    type="button"
+                    data-no-drag
+                    data-tauri-drag-region="false"
+                    data-orchestration-icon
+                    aria-label={`Orchestrator, ${orchestration.tasks.length} ${
+                      orchestration.tasks.length === 1
+                        ? "subagent"
+                        : "subagents"
+                    }, ${orchestrationDone} done`}
+                    aria-describedby={
+                      orchestrationTooltipOpen
+                        ? orchestrationTooltipId
+                        : undefined
+                    }
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onFocus={() => setOrchestrationTooltipOpen(true)}
+                    onBlur={() => setOrchestrationTooltipOpen(false)}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setOrchestrationTooltipOpen(false);
+                      onSelect(session.id, event);
+                    }}
+                    className="grid size-5 shrink-0 place-items-center rounded-md text-fuchsia-300/65 hover:bg-content/10 hover:text-fuchsia-200/90"
                   >
-                    {label}
-                  </span>
+                    <Share className="size-3" />
+                  </button>
                 </div>
-              );
-            })}
-          </div>
-        </Popover>
-      ) : null}
-    </div>
+              ) : null}
+            </span>
+          </span>
+        </div>
+        {orchestration && orchestrationTooltipOpen ? (
+          <Popover
+            anchor={orchestrationTooltipRootRef}
+            side="right"
+            align="end"
+            width={248}
+            maxHeight={320}
+            role="tooltip"
+            id={orchestrationTooltipId}
+            className="pointer-events-none overflow-y-auto p-2.5"
+          >
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-[11px] font-semibold text-content/85">
+                Subagents
+              </span>
+              <span className="shrink-0 text-[10px] tabular-nums text-content/45">
+                {orchestrationDone}/{orchestration.tasks.length} done
+              </span>
+            </div>
+            <div className="mt-1.5 flex flex-col gap-0.5">
+              {orchestration.tasks.map((task) => {
+                const label = orchestrationTaskLabel(task, orchestration);
+                return (
+                  <div
+                    key={task.sessionId}
+                    className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-1"
+                  >
+                    <HarnessIcon
+                      harness={task.harness}
+                      className="size-3.5 shrink-0 opacity-75"
+                    />
+                    <span className="min-w-0 flex-1 truncate text-[11px] text-content/75">
+                      {task.title}
+                    </span>
+                    <span
+                      className={`shrink-0 text-[10px] ${
+                        task.needsInput ||
+                        task.status === "failed" ||
+                        task.status === "blocked" ||
+                        task.status === "interrupted"
+                          ? "text-amber-400"
+                          : label === "Working"
+                            ? "text-accent"
+                            : task.status === "completed"
+                              ? "text-emerald-400"
+                              : "text-content/45"
+                      }`}
+                    >
+                      {label}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </Popover>
+        ) : null}
+      </div>
+    </>
   );
 });
 
@@ -4029,41 +4060,48 @@ function DiffStat({
 }) {
   const containerRef = useRef<HTMLSpanElement>(null);
   const contentRef = useRef<HTMLSpanElement>(null);
+  const hasChanges = additions > 0 || deletions > 0;
 
   useLayoutEffect(() => {
     const container = containerRef.current;
     const content = contentRef.current;
     if (!container || !content) return;
 
-    const fit = () => {
-      const availableWidth = container.getBoundingClientRect().width;
-      if (availableWidth <= 0) return;
-
-      // Measure at the normal size so the text can grow again after resizing.
-      let maxFontSize = 11;
-      content.style.fontSize = `${maxFontSize}px`;
-      if (content.getBoundingClientRect().width <= availableWidth) return;
-
-      // Font metrics can change at small sizes, so check the rendered width.
-      let minFontSize = 0;
-      while (maxFontSize - minFontSize > 0.1) {
-        const fontSize = (minFontSize + maxFontSize) / 2;
-        content.style.fontSize = `${fontSize}px`;
-        if (content.getBoundingClientRect().width > availableWidth) {
-          maxFontSize = fontSize;
-        } else {
-          minFontSize = fontSize;
-        }
+    let availableWidth = 0;
+    let textWidth = 0;
+    let fontSize = parseFloat(content.style.fontSize) || 11;
+    let frame = 0;
+    // Observe both boxes after layout. Repeated font writes and synchronous
+    // measurements here used to force whole-workspace layout on navigation.
+    // The gap uses em units, so the complete label scales with its font size.
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.target === container)
+          availableWidth = entry.contentRect.width;
+        else textWidth = entry.contentRect.width;
       }
-      content.style.fontSize = `${minFontSize}px`;
-    };
-
-    fit();
-    // Sidebar dragging writes its width directly to the DOM, without a render.
-    const observer = new ResizeObserver(fit);
+      if (!availableWidth || !textWidth || frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        const next = Math.max(
+          0.1,
+          Math.min(
+            11,
+            Math.floor((fontSize * availableWidth * 10) / textWidth) / 10,
+          ),
+        );
+        if (next === fontSize) return;
+        content.style.fontSize = `${next}px`;
+        fontSize = next;
+      });
+    });
     observer.observe(container);
-    return () => observer.disconnect();
-  }, [additions, deletions]);
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [hasChanges]);
 
   if (additions <= 0 && deletions <= 0) return null;
 

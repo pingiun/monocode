@@ -144,7 +144,8 @@ export function SidebarWorktreeSwitcher({
   }, [cwd, data, focus, onSelect, pending, switchError]);
 
   useEffect(() => {
-    if (switchError) setOpen(true);
+    if (!switchError) return;
+    setOpen(true);
   }, [switchError]);
 
   const focused =
@@ -153,6 +154,16 @@ export function SidebarWorktreeSwitcher({
   const title = focus
     ? (focused?.branch ?? focus.branch ?? "Detached worktree")
     : "Workspace";
+  const worktreeTitle = focus
+    ? `${focus.branch ?? "detached"}\n${prettyCwd(focus.path)}`
+    : (main?.branch ?? "Project folder");
+  const busyIcon =
+    pending || creating ? (
+      <Loader
+        aria-label={creating ? "Creating worktree" : "Switching working copy"}
+        className="size-3.5 shrink-0 animate-spin text-content/45"
+      />
+    ) : null;
   return (
     <>
       <button
@@ -164,11 +175,7 @@ export function SidebarWorktreeSwitcher({
         aria-expanded={open}
         aria-busy={pending || creating}
         disabled={creating}
-        title={
-          focus
-            ? `${focus.branch ?? "detached"}\n${prettyCwd(focus.path)}`
-            : (main?.branch ?? "Project folder")
-        }
+        title={worktreeTitle}
         onClick={() => {
           if (open) closePicker();
           else openPicker();
@@ -181,14 +188,7 @@ export function SidebarWorktreeSwitcher({
         className="-ml-1.5 flex h-6.5 min-w-0 max-w-full items-center gap-2 rounded-md px-1.5 text-sm font-medium leading-tight hover:bg-content/8 aria-expanded:bg-content/8"
       >
         <span className="min-w-0 truncate">{title}</span>
-        {pending || creating ? (
-          <Loader
-            aria-label={
-              creating ? "Creating worktree" : "Switching working copy"
-            }
-            className="size-3.5 shrink-0 animate-spin text-content/45"
-          />
-        ) : (
+        {busyIcon ?? (
           <ChevronsUpDown className="size-3.5 shrink-0 text-content/45" />
         )}
       </button>

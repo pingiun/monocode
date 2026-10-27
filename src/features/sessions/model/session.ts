@@ -52,7 +52,19 @@ export type BlockRole =
   | "tasks"
   | "plan"
   | "system"
-  | "handoff";
+  | "handoff"
+  /** A `!command` the user ran locally from the composer. */
+  | "bash";
+
+/** A composer `!command`: what ran, and what it printed. */
+export type BashRun = {
+  command: string;
+  stdout: string;
+  stderr: string;
+  status: "running" | "done" | "failed";
+  exitCode?: number | null;
+  timedOut?: boolean;
+};
 
 /** A session created by a Mono during this conversation turn. */
 export type MonoSpawnedSession = {
@@ -217,6 +229,8 @@ export type AgentStep = {
   toolKind?: string;
   status?: string;
   detail?: string;
+  /** Large output left in storage on load; see `loadToolDetail`. */
+  detailOmitted?: boolean;
   preview?: ToolPreview;
 };
 
@@ -280,6 +294,10 @@ export type QueuedMessage = {
   intent?: TurnIntent;
   /** An app notification that must wait for an idle Mono, never steer its work. */
   monoSessionCompletion?: MonoSessionCompletion;
+  /** Queued by a project coordinator into its busy thread; its name. */
+  forwardedBy?: string;
+  /** Stable CLI request that queued it, for safe retries. */
+  appRequestId?: string;
   /** Delivery failed; the message remains available to retry or edit. */
   error?: string;
 };
@@ -336,14 +354,19 @@ export type Block = {
   intent?: Extract<TurnIntent, "plan" | "orchestrate">;
   /** Stable CLI request that submitted this turn, for safe retries. */
   appRequestId?: string;
+  /** A project coordinator sent this turn into its thread; its name. */
+  forwardedBy?: string;
   /** Provider-reported token metrics for this user turn, when available. */
   turnMetrics?: TurnMetrics;
+  bash?: BashRun;
   tool?: {
     callId?: string;
     title?: string;
     kind?: string;
     status?: string;
     detail?: string;
+    /** Large output left in storage on load; see `loadToolDetail`. */
+    detailOmitted?: boolean;
     preview?: ToolPreview;
     /** Every file in a multi-file edit, retained for checkpoint recovery. */
     paths?: string[];
@@ -762,17 +785,15 @@ export function sessionNeedsInput(session: Session): boolean {
 }
 
 /**
- * The agent itself is at work. A turn it yielded with only background work
- * left (a dev server, a watcher) stays open underneath, but the agent is
- * waiting, not working, so running indicators should not read it as busy.
- * Subagents it is still waiting on count as work.
+ * The session's turn is still open. A turn the agent yielded with background
+ * work left (a script, a monitor, a subagent) counts too: the agent wakes when
+ * that work reports back, so the sidebar, project rail, and tab keep showing
+ * it as running, like the Working list does.
  */
 export function sessionWorking(
   session: Pick<Session, "busy" | "backgroundTasks">,
 ): boolean {
-  if (!session.busy) return false;
-  const tasks = session.backgroundTasks;
-  return !tasks?.length || tasks.some((task) => task.agent);
+  return !!session.busy;
 }
 
 /** The single unsent user turn held by a session, when present. */

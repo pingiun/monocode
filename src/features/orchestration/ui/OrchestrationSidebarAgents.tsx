@@ -11,7 +11,12 @@ import {
   OrchestrationActions,
   OrchestrationWorkers,
 } from "./OrchestrationActions";
-import { Check, ChevronDown, ChevronRight, CircleAlert } from "../../../shared/ui/icons";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+} from "../../../shared/ui/icons";
 import { TerminalSpinner } from "../../sessions/ui/TerminalSpinner";
 
 export function OrchestrationSidebarAgents({
@@ -101,7 +106,7 @@ export function OrchestrationSidebarAgents({
       */}
       <div
         aria-label="Orchestrated agents"
-        className="-mx-2 flex touch-pan-y flex-col gap-px"
+        className="flex touch-pan-y flex-col -mx-2 gap-px"
         onPointerDown={(event) => event.stopPropagation()}
         onClick={(event) => event.stopPropagation()}
       >
@@ -153,7 +158,7 @@ export function OrchestrationSidebarAgents({
                     </>
                   )}
                 </span>
-                <span className="min-w-0 flex-1 truncate text-[12px] leading-snug text-content/80">
+                <span className="min-w-0 flex-1 truncate leading-snug text-[12px] text-content/80">
                   {task.title}
                 </span>
                 <span
@@ -185,7 +190,7 @@ export function OrchestrationSidebarAgents({
               </button>
               {/* Indented to the title's column: the icon slot and its gap. */}
               {open && (
-                <div className="space-y-2 pb-3 pl-6.5 pr-2">
+                <div className="space-y-2 pb-3 pr-2 pl-6.5">
                   <p
                     className="flex min-w-0 items-center gap-1.5 text-[11px] text-content/45"
                     title={`${model} · ${HARNESS_TITLE[task.harness]}`}

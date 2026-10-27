@@ -407,10 +407,14 @@ function opaqueWindowBackground(): Rgb {
     const value = Number.parseFloat(style.getPropertyValue(name));
     return Number.isFinite(value) ? value : fallback;
   };
+  const lightness = read(
+    "--background-lightness",
+    THEME_DARK_LIGHTNESS_DEFAULT,
+  );
   return hslToRgb(
     read("--theme-hue", THEME_HUE_DEFAULT),
     read("--theme-saturation", THEME_SATURATION_DEFAULT),
-    read("--background-lightness", THEME_DARK_LIGHTNESS_DEFAULT),
+    lightness,
   );
 }
 
@@ -549,7 +553,9 @@ export function saveSidebarBlur(value: number) {
 
 export function applySidebarBlur(value: number) {
   const next = Math.round(clamp(value, SIDEBAR_BLUR_MIN, SIDEBAR_BLUR_MAX));
-  void invoke("set_window_background_blur", { radius: next });
+  void invoke("set_window_background_blur", {
+    radius: next,
+  });
   return next;
 }
 

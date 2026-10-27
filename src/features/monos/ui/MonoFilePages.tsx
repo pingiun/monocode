@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { isImeComposition } from "../../../shared/lib/keyboard";
 import { IconButton } from "../../../app/shell/TitleBar";
 import { Pencil, Plus, StickyNote, Trash2 } from "../../../shared/ui/icons";
@@ -19,7 +19,6 @@ import {
   withoutLine,
   type MemoryLine,
 } from "../model/monoMemory";
-import { HabitButton } from "./MonoHabits";
 import {
   AutoTextarea,
   Empty,
@@ -52,7 +51,10 @@ function factIndex(memory: string, original: string): number {
   return indices[0];
 }
 
-/** The soul as its markdown source, editable in place; saved when you leave it. */
+/**
+ * A project's instructions (its soul) as markdown source, editable in place;
+ * saved when you leave it. They reach the coordinator and its threads.
+ */
 export function SoulPage({
   monoId,
   agent,
@@ -66,7 +68,12 @@ export function SoulPage({
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col" data-mono-soul>
-      <PageHeader title="Soul" onBack={onBack} />
+      <PageHeader title="Instructions" onBack={onBack} />
+      <p className="shrink-0 border-b border-stroke px-4 py-2.5 text-[11.5px] leading-relaxed text-content/50">
+        What the coordinator and every thread should keep in mind: code style,
+        how to test, what not to touch. The coordinator passes the parts that
+        matter on to each thread.
+      </p>
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-none">
         {files ? (
           <FileField
@@ -75,9 +82,9 @@ export function SoulPage({
             file="soul"
             value={files.soul}
             hash={files.soulHash}
-            label={`${agent.name} soul`}
+            label={`${agent.name} instructions`}
             author={agent.name}
-            placeholder="Who it is, and what it should always keep in mind"
+            placeholder="What the coordinator and its threads should always keep in mind"
           />
         ) : (
           <Empty>Loading…</Empty>
@@ -246,7 +253,32 @@ function FactIcon({ dim = false }: { dim?: boolean }) {
   );
 }
 
-/** One fact, laid out like a habit: its text, when it was noted, and actions on hover. */
+function RowButton({
+  label,
+  disabled = false,
+  onClick,
+  children,
+}: {
+  label: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onClick}
+      className="grid size-6 place-items-center rounded text-content/50 enabled:hover:bg-content/8 enabled:hover:text-content disabled:opacity-35"
+    >
+      {children}
+    </button>
+  );
+}
+
+/** One fact: its text, when it was noted, and actions on hover. */
 function FactRow({
   index,
   text,
@@ -301,13 +333,13 @@ function FactRow({
       )}
       <span className="flex shrink-0 items-center pr-2 opacity-0 transition-opacity group-hover/fact:opacity-100 focus-within:opacity-100">
         {struck ? null : (
-          <HabitButton label="Edit" onClick={onEdit}>
+          <RowButton label="Edit" onClick={onEdit}>
             <Pencil className="size-3.5" strokeWidth={1.75} />
-          </HabitButton>
+          </RowButton>
         )}
-        <HabitButton label={`Forget: ${text}`} onClick={onForget}>
+        <RowButton label={`Forget: ${text}`} onClick={onForget}>
           <Trash2 className="size-3.5" strokeWidth={1.75} />
-        </HabitButton>
+        </RowButton>
       </span>
     </li>
   );
